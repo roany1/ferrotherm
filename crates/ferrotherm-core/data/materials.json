@@ -67,6 +67,9 @@
     { "id": "ag-epoxy", "name": "Silver-filled epoxy die attach (generic)", "category": "joining", "k": 2.0, "density": 3500.0, "cp": 800.0,
       "specs": ["MIL-STD-883 Method 5011"], "source": "Generic; products range 1-60 W/mK", "notes": "Replace with the actual adhesive datasheet value" },
 
+    { "id": "mold-compound", "name": "Epoxy mould compound (IC package body, generic)", "category": "coating", "k": 0.8, "density": 1950.0, "cp": 900.0,
+      "specs": [], "source": "Generic placeholder; supplier datasheets range about 0.6-1.0 W/mK (filled epoxy EMC)",
+      "notes": "Used for imported component bodies without a compact model" },
     { "id": "tim-grease", "name": "Thermal grease (generic)", "category": "tim", "k": 1.0, "density": 2500.0, "cp": 1000.0,
       "specs": [], "source": "Generic placeholder", "notes": "Replace with product datasheet value" },
     { "id": "tim-gap-pad-3", "name": "Gap pad 3 W/mK (generic)", "category": "tim", "k": 3.0, "density": 3000.0, "cp": 1000.0,

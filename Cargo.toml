@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/ferrotherm-core", "crates/ferrotherm-cli", "crates/ferrotherm-gui"]
+members = ["crates/ferrotherm-core", "crates/ferrotherm-cli", "crates/ferrotherm-gui", "crates/ferrotherm-io"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 authors = ["Roany Romano"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.75"
+rust-version = "1.95"
 description = "FerroTherm — open-source thermal solver for electronics enclosures, written in Rust"
 keywords = ["thermal", "simulation", "electronics-cooling", "cfd", "heat-transfer"]
 categories = ["science", "simulation"]

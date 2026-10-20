@@ -12,8 +12,8 @@ use crate::vtk;
 use std::path::{Path, PathBuf};
 
 /// Writes `<stem>.vtr` (steady) or `<stem>_NNNNN.vtr` + `<stem>.pvd`
-/// (transient), `report.md`, `report.json` and, when there are components,
-/// `junctions.csv`. Returns the paths written.
+/// (transient), `report.md`, `report.json`, `blocks.csv` and, when there are
+/// components, `components.csv` and `junctions.csv`. Returns the paths written.
 pub fn write_results(
     dir: &Path,
     stem: &str,
@@ -50,6 +50,10 @@ pub fn write_results(
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| Error::Invalid(format!("cannot serialise report: {e}")))?;
     write("report.json", &json)?;
+    write("blocks.csv", &vtk::blocks_csv(report))?;
+    if !report.components.is_empty() {
+        write("components.csv", &vtk::components_csv(report))?;
+    }
     if !model.components.is_empty() {
         write(
             "junctions.csv",
