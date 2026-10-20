@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: ".exe" }
+          - { os: macos-latest,   target: aarch64-apple-darwin,   ext: "" }
+          - { os: macos-latest,   target: x86_64-apple-darwin,    ext: "" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, ext: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build CLI and GUI
+        run: cargo build --release -p ferrotherm-cli -p ferrotherm-gui --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name=ferrotherm-${{ github.ref_name }}-${{ matrix.target }}
+          bin=target/${{ matrix.target }}/release
+          mkdir "$name"
+          cp "$bin/ferrotherm${{ matrix.ext }}" "$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          cp -r examples docs "$name/"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # Minimal app bundle so the GUI opens with a double-click.
+            app="$name/FerroTherm.app/Contents"
+            mkdir -p "$app/MacOS"
+            cp "$bin/ferrotherm-gui" "$app/MacOS/FerroTherm"
+            cat > "$app/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>FerroTherm</string>
+            <key>CFBundleDisplayName</key><string>FerroTherm</string>
+            <key>CFBundleIdentifier</key><string>io.github.ferrotherm</string>
+            <key>CFBundleExecutable</key><string>FerroTherm</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${{ github.ref_name }}</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSHumanReadableCopyright</key><string>Copyright 2026 Roany Romano</string>
+          </dict></plist>
+          EOF
+            # ad-hoc signature (not notarised): first launch needs right-click > Open
+            codesign --force --deep -s - "$name/FerroTherm.app" || true
+          else
+            cp "$bin/ferrotherm-gui${{ matrix.ext }}" "$name/"
+          fi
+          if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ferrotherm-*.*
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: ferrotherm-${{ matrix.target }}
+          path: ferrotherm-*.*

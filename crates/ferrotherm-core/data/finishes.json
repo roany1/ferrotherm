@@ -1,0 +1,14 @@
+{
+  "_comment": "Surface finish library for radiation boundary conditions. Total hemispherical emissivity, TYPICAL values only: emissivity of a real part depends on thickness, colour, roughness and ageing. Measure (e.g. ASTM E408) for design-critical work.",
+  "finishes": [
+    { "id": "al-polished", "name": "Aluminium, polished", "emissivity": 0.05, "specs": [], "source": "Incropera / typical tables (0.03-0.06)" },
+    { "id": "al-machined", "name": "Aluminium, machined / as-received", "emissivity": 0.09, "specs": [], "source": "Typical tables (0.07-0.15)" },
+    { "id": "al-chem-film", "name": "Aluminium, chemical conversion coating", "emissivity": 0.12, "specs": ["MIL-DTL-5541"], "source": "Typical tables (0.1-0.2); conversion films are very thin and stay close to bare metal" },
+    { "id": "al-anodize-clear", "name": "Aluminium, clear anodize", "emissivity": 0.77, "specs": ["MIL-A-8625 Type II"], "source": "Typical tables (0.6-0.85, thickness dependent)" },
+    { "id": "al-anodize-black", "name": "Aluminium, black anodize", "emissivity": 0.86, "specs": ["MIL-A-8625 Type II Class 2"], "source": "Typical tables (0.82-0.9)" },
+    { "id": "paint-polyurethane", "name": "Polyurethane topcoat (matte)", "emissivity": 0.9, "specs": ["MIL-PRF-85285"], "source": "Typical value for organic paints (0.85-0.95)" },
+    { "id": "copper-oxidised", "name": "Copper, oxidised", "emissivity": 0.65, "specs": [], "source": "Typical tables (0.6-0.8)" },
+    { "id": "ss-as-received", "name": "Stainless steel, as received", "emissivity": 0.3, "specs": [], "source": "Typical tables (0.2-0.4)" },
+    { "id": "pcb-soldermask", "name": "PCB with solder mask", "emissivity": 0.9, "specs": [], "source": "Typical value (0.85-0.95)" }
+  ]
+}

@@ -1,0 +1,20 @@
+[package]
+name = "ferrotherm-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Desktop graphical interface of FerroTherm"
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "ferrotherm-gui"
+path = "src/main.rs"
+
+[dependencies]
+ferrotherm-core = { path = "../ferrotherm-core" }
+eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "wgpu", "x11", "wayland", "accesskit"] }
+rfd = "0.17"
+serde_json.workspace = true

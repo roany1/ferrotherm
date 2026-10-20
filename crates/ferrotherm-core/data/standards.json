@@ -1,0 +1,31 @@
+{
+  "_comment": "Environmental presets and junction-temperature derating limits. Every entry cites its source; check the current revision of each document before using it for qualification.",
+  "environments": [
+    { "id": "mil-std-810h-a1-hot-dry", "name": "MIL-STD-810H Hot-Dry (A1)", "ambient_min_c": 32.0, "ambient_max_c": 49.0, "induced_min_c": 33.0, "induced_max_c": 71.0,
+      "source": "MIL-STD-810H Method 501.7, Table 501.7-I (high temperature climatic design types)",
+      "notes": "Ambient = operational air temperature; induced = storage/transit (solar-loaded enclosed space)" },
+    { "id": "mil-std-810h-a2-basic-hot", "name": "MIL-STD-810H Basic Hot (A2)", "ambient_min_c": 30.0, "ambient_max_c": 43.0, "induced_min_c": 30.0, "induced_max_c": 63.0,
+      "source": "MIL-STD-810H Method 501.7, Table 501.7-I", "notes": "" },
+    { "id": "mil-temp-range", "name": "Military temperature range (microcircuits)", "ambient_min_c": -55.0, "ambient_max_c": 125.0, "induced_min_c": -65.0, "induced_max_c": 150.0,
+      "source": "Operating case range -55/+125 C used for MIL-PRF-38535 class Q/V devices; storage range typical -65/+150 C",
+      "notes": "This is a device rating, not a climate: use it as a case-temperature limit check, not as an ambient" }
+  ],
+  "derating": [
+    { "id": "sd18-hermetic-protected", "name": "NSWC Crane SD-18, hermetic microcircuit, protected env.", "tj_max_c": 125.0,
+      "source": "NAVSEA NSWC Crane SD-18 Part Requirements and Application Guide, Microcircuits Derating, Table 1 (hermetic, all types except GaAs)" },
+    { "id": "sd18-hermetic-normal", "name": "NSWC Crane SD-18, hermetic microcircuit, normal env.", "tj_max_c": 110.0,
+      "source": "NAVSEA NSWC Crane SD-18, Microcircuits Derating, Table 1 (hermetic)" },
+    { "id": "sd18-hermetic-severe", "name": "NSWC Crane SD-18, hermetic microcircuit, severe env.", "tj_max_c": 100.0,
+      "source": "NAVSEA NSWC Crane SD-18, Microcircuits Derating, Table 1 (hermetic)" },
+    { "id": "sd18-plastic1-protected", "name": "NSWC Crane SD-18, plastic type 1 (heat-dissipating features), protected", "tj_max_c": 90.0,
+      "source": "NAVSEA NSWC Crane SD-18, Microcircuits Derating (digital, linear, memory)" },
+    { "id": "sd18-plastic1-normal", "name": "NSWC Crane SD-18, plastic type 1, normal", "tj_max_c": 85.0,
+      "source": "NAVSEA NSWC Crane SD-18, Microcircuits Derating (digital, linear, memory)" },
+    { "id": "sd18-plastic1-up-protected", "name": "NSWC Crane SD-18, plastic type 1 microprocessor, protected", "tj_max_c": 85.0,
+      "source": "NAVSEA NSWC Crane SD-18, Microcircuits Derating" },
+    { "id": "sd18-plastic1-up-normal", "name": "NSWC Crane SD-18, plastic type 1 microprocessor, normal", "tj_max_c": 75.0,
+      "source": "NAVSEA NSWC Crane SD-18, Microcircuits Derating" },
+    { "id": "sd18-plastic2", "name": "NSWC Crane SD-18, plastic type 2 (heat through leads only)", "tj_max_c": 70.0,
+      "source": "NAVSEA NSWC Crane SD-18, Microcircuits Derating" }
+  ]
+}

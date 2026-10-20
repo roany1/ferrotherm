@@ -1,0 +1,6 @@
+/target
+*_results/
+*.vtr
+*.pvd
+.DS_Store
+Thumbs.db
