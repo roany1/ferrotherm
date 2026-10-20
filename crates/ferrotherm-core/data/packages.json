@@ -21,6 +21,9 @@
     { "id": "mil217-can", "name": "Metal can", "family": "MIL-HDBK-217F default", "r_jc": 70.0, "r_jb": null, "case_face": "bottom",
       "size_mm": null, "standard": "MIL-HDBK-217F Notice 2, section 5.11", "notes": "Single value, no die-area split" },
 
+    { "id": "generic", "name": "Generic body (size given in the case)", "family": "Generic", "r_jc": null, "r_jb": null, "case_face": "top",
+      "size_mm": null, "standard": "", "notes": "Used by ECAD import: give size, r_jc and r_jb in the component" },
+
     { "id": "lcc-28", "name": "Ceramic leadless chip carrier, 28 terminals (geometry template)", "family": "MIL-STD-1835 style ceramic", "r_jc": null, "r_jb": null, "case_face": "bottom",
       "size_mm": [11.43, 11.43, 2.0], "standard": "Outline family per MIL-STD-1835; body 0.450 in square, height nominal",
       "notes": "Use mil217-chip-carrier-* r_jc if the device value is unknown" },

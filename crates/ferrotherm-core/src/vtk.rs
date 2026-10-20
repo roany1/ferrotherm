@@ -9,9 +9,13 @@ use crate::simulate::Snapshot;
 use std::fmt::Write as _;
 
 fn push_array(out: &mut String, name: &str, ty: &str, vals: impl Iterator<Item = String>) {
+    push_array_n(out, name, ty, 1, vals)
+}
+
+fn push_array_n(out: &mut String, name: &str, ty: &str, comps: usize, vals: impl Iterator<Item = String>) {
     let _ = writeln!(
         out,
-        "        <DataArray type=\"{ty}\" Name=\"{name}\" format=\"ascii\">"
+        "        <DataArray type=\"{ty}\" Name=\"{name}\" NumberOfComponents=\"{comps}\" format=\"ascii\">"
     );
     let mut line = String::new();
     for (i, v) in vals.enumerate() {
@@ -44,7 +48,11 @@ pub fn vtr(m: &Model, s: &Snapshot) -> String {
     let ext = format!("0 {} 0 {} 0 {}", n[0], n[1], n[2]);
     let _ = writeln!(out, "  <RectilinearGrid WholeExtent=\"{ext}\">");
     let _ = writeln!(out, "    <Piece Extent=\"{ext}\">");
-    out.push_str("      <CellData Scalars=\"temperature_C\">\n");
+    if s.vel.is_some() {
+        out.push_str("      <CellData Scalars=\"temperature_C\" Vectors=\"velocity_m_s\">\n");
+    } else {
+        out.push_str("      <CellData Scalars=\"temperature_C\">\n");
+    }
     push_array(
         &mut out,
         "temperature_C",
@@ -85,6 +93,24 @@ pub fn vtr(m: &Model, s: &Snapshot) -> String {
         "Float64",
         m.k.iter().map(|k| format!("{:.6e}", k[2])),
     );
+    if let Some(v) = &s.vel {
+        push_array_n(
+            &mut out,
+            "velocity_m_s",
+            "Float32",
+            3,
+            v.iter().map(|u| format!("{:.6e} {:.6e} {:.6e}", u[0], u[1], u[2])),
+        );
+        push_array(
+            &mut out,
+            "speed_m_s",
+            "Float32",
+            v.iter().map(|u| format!("{:.6e}", (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt())),
+        );
+    }
+    if let Some(p) = &s.p {
+        push_array(&mut out, "pressure_Pa", "Float32", p.iter().map(|v| format!("{v:.6e}")));
+    }
     out.push_str("      </CellData>\n      <Coordinates>\n");
     for (a, name) in ["x_mm", "y_mm", "z_mm"].iter().enumerate() {
         push_array(
@@ -126,6 +152,97 @@ pub fn junction_csv(m: &Model, hist: &[(f64, Vec<f64>)]) -> String {
             out.push_str(&format!(",{x:.6}"));
         }
         out.push('\n');
+    }
+    out
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn opt(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:.4}")).unwrap_or_default()
+}
+
+/// Component results as CSV (one row per component).
+pub fn components_csv(r: &crate::report::Report) -> String {
+    let mut out = String::from(
+        "name,package,power_W,Tj_C,Tcase_C,Tboard_C,Q_case_W,Q_board_W,Tj_limit_C,limit_source,margin_K,pass\n",
+    );
+    for c in &r.components {
+        let _ = writeln!(
+            out,
+            "{},{},{:.6},{:.4},{},{},{:.6},{:.6},{},{},{},{}",
+            csv_field(&c.name),
+            csv_field(&c.package),
+            c.power_w,
+            c.tj_c,
+            opt(c.t_case_c),
+            opt(c.t_board_c),
+            c.q_case_w,
+            c.q_board_w,
+            opt(c.tj_limit_c),
+            csv_field(c.limit_source.as_deref().unwrap_or("")),
+            opt(c.margin_k),
+            match c.pass {
+                Some(true) => "PASS",
+                Some(false) => "FAIL",
+                None => "",
+            }
+        );
+    }
+    out
+}
+
+/// Block temperature statistics as CSV.
+pub fn blocks_csv(r: &crate::report::Report) -> String {
+    let mut out = String::from("name,material,power_W,Tmin_C,Tavg_C,Tmax_C\n");
+    for b in &r.blocks {
+        let _ = writeln!(
+            out,
+            "{},{},{:.6},{:.4},{:.4},{:.4}",
+            csv_field(&b.name),
+            csv_field(&b.material),
+            b.power_w,
+            b.t_min_c,
+            b.t_avg_c,
+            b.t_max_c
+        );
+    }
+    out
+}
+
+/// Temperature map of a horizontal plane at height `z_mm` (cell centres),
+/// CSV with columns x_mm, y_mm, T_C — e.g. the board surface.
+pub fn plane_csv(m: &Model, s: &Snapshot, z_mm: f64) -> String {
+    let n = m.grid.n();
+    let z = z_mm * 1e-3;
+    let k = (0..n[2])
+        .min_by(|&a, &b| {
+            let ca = 0.5 * (m.grid.nodes[2][a] + m.grid.nodes[2][a + 1]);
+            let cb = 0.5 * (m.grid.nodes[2][b] + m.grid.nodes[2][b + 1]);
+            (ca - z).abs().total_cmp(&(cb - z).abs())
+        })
+        .unwrap_or(0);
+    let mut out = format!(
+        "# plane z = {:.4} mm (cell centres)\nx_mm,y_mm,T_C\n",
+        0.5e3 * (m.grid.nodes[2][k] + m.grid.nodes[2][k + 1])
+    );
+    for j in 0..n[1] {
+        for i in 0..n[0] {
+            let c = m.grid.idx(i, j, k);
+            let _ = writeln!(
+                out,
+                "{:.4},{:.4},{:.4}",
+                0.5e3 * (m.grid.nodes[0][i] + m.grid.nodes[0][i + 1]),
+                0.5e3 * (m.grid.nodes[1][j] + m.grid.nodes[1][j + 1]),
+                s.t[c]
+            );
+        }
     }
     out
 }
