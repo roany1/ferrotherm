@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/ferrotherm-core", "crates/ferrotherm-cli", "crates/ferrotherm-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Roany Romano"]
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+description = "FerroTherm — open-source thermal solver for electronics enclosures, written in Rust"
+keywords = ["thermal", "simulation", "electronics-cooling", "cfd", "heat-transfer"]
+categories = ["science", "simulation"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+anyhow = "1"
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,203 @@
+# FerroTherm example — sealed MIL avionics-style enclosure
+# Author: Roany Romano
+#
+# Units: mm, °C, W, W/(m² K), s
+# Thermal resistances marked "EXAMPLE" are illustrative: replace them with
+# the device datasheet values (JESD51) before drawing any conclusion.
+
+[meta]
+title = "Sealed aluminium enclosure, MIL-STD-810H hot-dry"
+author = "Roany Romano"
+description = "8-layer board, FPGA conducted to the lid through a pedestal, ceramic CQFP, DC/DC brick on the side wall"
+
+[domain]
+min = [0, 0, 0]
+max = [200, 150, 60]
+material = "air-still"          # sealed box: internal air conducts only in Phase 0
+
+[grid]
+max_cell_mm = 2.0
+
+[environment]
+preset = "mil-std-810h-a1-hot-dry"
+use = "ambient_max"             # 49 °C operational ambient
+
+# ---------------------------------------------------------------- chassis
+[[blocks]]
+name = "base"
+material = "al-6061-t6"
+min = [0, 0, 0]
+max = [200, 150, 4]
+
+[[blocks]]
+name = "lid"
+material = "al-6061-t6"
+min = [0, 0, 57]
+max = [200, 150, 60]
+
+[[blocks]]
+name = "wall_xmin"
+material = "al-6061-t6"
+min = [0, 0, 4]
+max = [3, 150, 57]
+
+[[blocks]]
+name = "wall_xmax"
+material = "al-6061-t6"
+min = [197, 0, 4]
+max = [200, 150, 57]
+
+[[blocks]]
+name = "wall_ymin"
+material = "al-6061-t6"
+min = [3, 0, 4]
+max = [197, 3, 57]
+
+[[blocks]]
+name = "wall_ymax"
+material = "al-6061-t6"
+min = [3, 147, 4]
+max = [197, 150, 57]
+
+# ---------------------------------------------------------------- board on 4 standoffs
+[[blocks]]
+name = "standoff_1"
+material = "al-6061-t6"
+min = [10, 10, 4]
+max = [16, 16, 10]
+
+[[blocks]]
+name = "standoff_2"
+material = "al-6061-t6"
+min = [184, 10, 4]
+max = [190, 16, 10]
+
+[[blocks]]
+name = "standoff_3"
+material = "al-6061-t6"
+min = [10, 134, 4]
+max = [16, 140, 10]
+
+[[blocks]]
+name = "standoff_4"
+material = "al-6061-t6"
+min = [184, 134, 4]
+max = [190, 140, 10]
+
+[[blocks]]
+name = "pcb"
+min = [8, 8, 10]
+max = [192, 142, 11.6]
+pcb = { thickness_mm = 1.6, layers = 8, copper_oz = 1.0, coverage = 0.6 }
+
+# ---------------------------------------------------------------- FPGA conduction path to the lid
+[[blocks]]
+name = "gap_pad_fpga"
+material = "tim-gap-pad-3"
+min = [40, 40, 13.4]
+max = [57, 57, 14.4]
+
+[[blocks]]
+name = "pedestal_fpga"
+material = "al-6061-t6"
+min = [38, 38, 14.4]
+max = [59, 59, 57]
+
+# ---------------------------------------------------------------- DC/DC brick bonded to the side wall
+[[blocks]]
+name = "dcdc_gap_pad"
+material = "tim-gap-pad-3"
+min = [3, 60, 20]
+max = [4, 110, 50]
+
+[[blocks]]
+name = "dcdc_brick"
+material = "epoxy-potting"
+min = [4, 60, 20]
+max = [16, 110, 50]
+power_w = 4.0
+
+# ---------------------------------------------------------------- components (2R compact models)
+[[components]]
+name = "U1_FPGA"
+package = "bga-17x17"
+position = [40, 40, 11.6]
+power_w = 8.0
+r_jc = 0.2                     # EXAMPLE value: use the datasheet
+r_jb = 4.0                     # EXAMPLE value: use the datasheet
+case_face = "top"
+derating = "sd18-plastic1-up-normal"
+
+[[components]]
+name = "U2_CQFP"
+package = "cqfp-132"
+position = [110, 40, 11.6]
+power_w = 2.0
+r_jc = 10.0                    # MIL-HDBK-217F default, ceramic flat package (large die)
+case_face = "bottom"
+derating = "sd18-hermetic-normal"
+
+[[components]]
+name = "Q1_REG"
+package = "d2pak"
+position = [150, 100, 11.6]
+power_w = 1.5
+r_jc = 1.5                     # EXAMPLE value: use the datasheet
+case_face = "bottom"
+tj_max_c = 125.0
+
+[[components]]
+name = "U3_LCC"
+package = "lcc-28"
+position = [110, 100, 11.6]
+power_w = 0.5
+r_jc = 20.0                    # MIL-HDBK-217F default, ceramic chip carrier (small die)
+case_face = "bottom"
+derating = "sd18-hermetic-normal"
+
+# ---------------------------------------------------------------- external surfaces
+# Natural convection + radiation from black-anodised surfaces to the 49 °C ambient.
+[[boundaries]]
+name = "lid_top"
+face = "zmax"
+type = "convection"
+h = 6.0
+finish = "al-anodize-black"
+
+[[boundaries]]
+name = "sides_x0"
+face = "xmin"
+type = "convection"
+h = 5.0
+finish = "al-anodize-black"
+
+[[boundaries]]
+name = "sides_x1"
+face = "xmax"
+type = "convection"
+h = 5.0
+finish = "al-anodize-black"
+
+[[boundaries]]
+name = "sides_y0"
+face = "ymin"
+type = "convection"
+h = 5.0
+finish = "al-anodize-black"
+
+[[boundaries]]
+name = "sides_y1"
+face = "ymax"
+type = "convection"
+h = 5.0
+finish = "al-anodize-black"
+
+[[boundaries]]
+name = "base_mount"
+face = "zmin"
+type = "convection"
+h = 3.0
+finish = "al-anodize-black"
+
+[solver]
+mode = "steady"

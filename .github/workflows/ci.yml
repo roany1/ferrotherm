@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --release -- -D warnings
+      - name: Tests (incl. analytical validation)
+        run: cargo test --release --all
+      - name: Example case
+        shell: bash
+        run: |
+          cargo run --release -p ferrotherm-cli -- run examples/mil_enclosure.toml -o example_results -q || code=$?
+          # exit code 2 = a component exceeded its Tj limit (expected in this example)
+          test "${code:-0}" = "0" -o "${code:-0}" = "2"
+          test -f example_results/report.md
