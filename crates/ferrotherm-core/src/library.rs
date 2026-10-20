@@ -45,12 +45,56 @@ pub struct Material {
     pub density: f64,
     /// J/(kg K)
     pub cp: f64,
+    /// Dynamic viscosity, Pa·s. A material with a viscosity is a fluid that
+    /// flows when `[flow]` is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viscosity: Option<f64>,
+    /// Volumetric thermal expansion coefficient, 1/K (Boussinesq buoyancy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beta: Option<f64>,
+    /// Temperature-dependent conductivity: `[[T_C, k], ...]` (isotropic
+    /// materials), linear interpolation, constant beyond the ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k_table: Option<Vec<[f64; 2]>>,
     #[serde(default)]
     pub specs: Vec<String>,
     #[serde(default)]
     pub source: String,
     #[serde(default)]
     pub notes: String,
+}
+
+impl Material {
+    /// A material that flows when the flow solver is enabled.
+    pub fn is_fluid(&self) -> bool {
+        self.viscosity.is_some()
+    }
+
+    /// Conductivity at temperature `t_c` (°C), per axis.
+    pub fn k_at(&self, t_c: f64) -> [f64; 3] {
+        match &self.k_table {
+            Some(tab) if !tab.is_empty() => {
+                let k = interp(tab, t_c);
+                [k, k, k]
+            }
+            _ => self.k.as_vec(),
+        }
+    }
+}
+
+/// Piecewise-linear interpolation in a sorted `[[x, y], ...]` table,
+/// constant beyond the ends.
+pub fn interp(tab: &[[f64; 2]], x: f64) -> f64 {
+    if x <= tab[0][0] {
+        return tab[0][1];
+    }
+    for w in tab.windows(2) {
+        if x <= w[1][0] {
+            let f = (x - w[0][0]) / (w[1][0] - w[0][0]);
+            return w[0][1] + f * (w[1][1] - w[0][1]);
+        }
+    }
+    tab[tab.len() - 1][1]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +268,23 @@ impl Library {
                     "material '{}' needs k, density and cp > 0",
                     m.id
                 )));
+            }
+            if let Some(mu) = m.viscosity {
+                if !(mu > 0.0) {
+                    return Err(Error::LibraryParse(format!(
+                        "material '{}': viscosity must be > 0",
+                        m.id
+                    )));
+                }
+            }
+            if let Some(tab) = &m.k_table {
+                let sorted = tab.windows(2).all(|w| w[1][0] > w[0][0]);
+                if tab.is_empty() || !sorted || tab.iter().any(|r| !(r[1] > 0.0)) {
+                    return Err(Error::LibraryParse(format!(
+                        "material '{}': k_table needs rows [T, k>0] with increasing T",
+                        m.id
+                    )));
+                }
             }
         }
         for f in &self.finishes {
