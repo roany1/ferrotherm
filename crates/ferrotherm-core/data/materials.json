@@ -76,6 +76,14 @@
     { "id": "epoxy-potting", "name": "Epoxy potting compound (filled, generic)", "category": "coating", "k": 0.6, "density": 1800.0, "cp": 1000.0,
       "specs": [], "source": "Generic placeholder (0.2-1.5 W/mK range)" },
 
+    { "id": "air", "name": "Air (flowing), 300 K", "category": "fluid", "k": 0.0263, "density": 1.1614, "cp": 1007.0,
+      "viscosity": 1.846e-5, "beta": 0.003333,
+      "specs": [], "source": "Incropera & DeWitt, Fundamentals of Heat and Mass Transfer, Table A.4 (300 K); beta = 1/T for an ideal gas",
+      "notes": "Flows when [flow] is enabled (Boussinesq buoyancy). Use air-still for sealed gaps that should only conduct." },
+    { "id": "water", "name": "Water (liquid), 300 K", "category": "fluid", "k": 0.613, "density": 997.0, "cp": 4179.0,
+      "viscosity": 8.55e-4, "beta": 2.761e-4,
+      "specs": [], "source": "Incropera & DeWitt, Fundamentals of Heat and Mass Transfer, Table A.6 (300 K)",
+      "notes": "Liquid cooling loops. Only one flowing fluid per model in this version." },
     { "id": "air-still", "name": "Air, conduction only (no convection)", "category": "fluid", "k": 0.0263, "density": 1.16, "cp": 1007.0,
       "specs": [], "source": "Incropera, 300 K", "notes": "Phase 0 has no fluid flow: internal air conducts only. This is conservative for natural convection cavities." },
 

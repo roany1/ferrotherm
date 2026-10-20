@@ -4,7 +4,8 @@
 //! Post-processing: block statistics, junction temperatures with derating
 //! checks, and the global energy balance.
 
-use crate::model::{Model, Owner, Side};
+use crate::flow::{FanResult, MonitorResult, OpeningResult};
+use crate::model::{Model, Owner};
 use crate::simulate::RunResult;
 use serde::Serialize;
 
@@ -32,6 +33,26 @@ pub struct ComponentResult {
     pub limit_source: Option<String>,
     pub margin_k: Option<f64>,
     pub pass: Option<bool>,
+    /// Temperature of every network node (multi-node models).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<(String, f64)>,
+    /// Heat leaving through each model surface, W.
+    pub surfaces: Vec<(String, f64)>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowSummary {
+    pub fluid: String,
+    pub turbulence: String,
+    pub iterations: usize,
+    pub converged: bool,
+    pub converged_by_monitors: bool,
+    /// Final normalised [mass, momentum, energy] residuals.
+    pub final_residuals: [f64; 3],
+    pub max_speed_m_s: f64,
+    pub fans: Vec<FanResult>,
+    pub openings: Vec<OpeningResult>,
+    pub monitors: Vec<MonitorResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,9 +80,15 @@ pub struct Report {
     pub linear_iterations: usize,
     pub nonlinear_iterations: usize,
     pub elapsed_s: f64,
+    /// Heat carried out by the air through openings, W (part of heat_out_w).
+    pub advected_out_w: f64,
+    /// Heat radiated out through openings, W (part of heat_out_w).
+    pub radiated_out_w: f64,
     pub blocks: Vec<BlockStats>,
     pub components: Vec<ComponentResult>,
     pub boundaries: Vec<BoundaryResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow: Option<FlowSummary>,
     pub warnings: Vec<String>,
 }
 
@@ -112,25 +139,22 @@ pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
     let mut comps = Vec::new();
     for c in &m.components {
         let tj = t[c.node];
-        let (mut qc, mut qb) = (0.0, 0.0);
-        for &(li, side) in &c.links {
+        let mut qs = vec![0.0; c.surfaces.len()];
+        for &(li, surf) in &c.links {
             let l = m.links[li];
-            let q = l.g * (tj - t[l.b]);
-            match side {
-                Side::Case => qc += q,
-                Side::Board => qb += q,
-            }
+            qs[surf as usize] += l.g * (t[l.a] - t[l.b]);
         }
-        for &(bi, side) in &c.boundary {
+        for &(bi, surf) in &c.boundary {
             let e = &m.boundary[bi];
-            let q = (tj - r.surface_t[bi]) / e.r_int;
-            match side {
-                Side::Case => qc += q,
-                Side::Board => qb += q,
-            }
+            qs[surf as usize] += (t[e.node] - r.surface_t[bi]) / e.r_int;
         }
-        let t_case = c.r_jc.map(|r| tj - qc * r);
-        let t_board = c.r_jb.map(|r| tj - qb * r);
+        let (qc, qb) = if c.network {
+            (0.0, 0.0)
+        } else {
+            (qs[0], qs[1])
+        };
+        let t_case = if c.network { None } else { c.r_jc.map(|r| tj - qc * r) };
+        let t_board = if c.network { None } else { c.r_jb.map(|r| tj - qb * r) };
         let (lim, src) = match &c.tj_limit {
             Some((l, s)) => (Some(*l), Some(s.clone())),
             None => (None, None),
@@ -148,6 +172,12 @@ pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
             limit_source: src,
             margin_k: lim.map(|l| l - tj),
             pass: lim.map(|l| tj <= l),
+            nodes: if c.network {
+                c.nodes.iter().map(|(n, i)| (n.clone(), t[*i])).collect()
+            } else {
+                vec![]
+            },
+            surfaces: c.surfaces.iter().cloned().zip(qs).collect(),
         });
     }
 
@@ -174,6 +204,8 @@ pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
         linear_iterations: r.linear_iterations,
         nonlinear_iterations: r.nonlinear_iterations,
         elapsed_s: r.elapsed_s,
+        advected_out_w: h.advected_out,
+        radiated_out_w: h.radiation_to_openings,
         blocks: block_stats,
         components: comps,
         boundaries: m
@@ -185,6 +217,25 @@ pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
                 heat_out_w: *q,
             })
             .collect(),
+        flow: r.flow.as_ref().map(|f| FlowSummary {
+            fluid: f.fluid.clone(),
+            turbulence: f.turbulence.clone(),
+            iterations: f.iterations,
+            converged: f.converged,
+            converged_by_monitors: f.converged_by_monitors,
+            final_residuals: f.residuals.last().copied().unwrap_or([0.0; 3]),
+            max_speed_m_s: f.max_speed_m_s,
+            fans: f.fans.clone(),
+            openings: f.openings.clone(),
+            monitors: f
+                .monitors
+                .iter()
+                .map(|mo| MonitorResult {
+                    history: vec![],
+                    ..mo.clone()
+                })
+                .collect(),
+        }),
         warnings: m.warnings.clone(),
     }
 }
@@ -231,7 +282,7 @@ impl Report {
             self.t_max_location_mm[2]
         );
         if !self.components.is_empty() {
-            s += "## Components (2R compact models)\n\n";
+            s += "## Components (compact models)\n\n";
             s += "| Component | Package | P [W] | Tj [°C] | Tcase [°C] | Tboard [°C] | Q case/board [W] | Tj limit [°C] | Margin [K] | Result |\n";
             s += "|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n";
             for c in &self.components {
@@ -268,7 +319,82 @@ impl Report {
                 s += &u.iter().map(|x| x.as_str()).collect::<Vec<_>>().join("; ");
                 s += "\n";
             }
+            for c in self.components.iter().filter(|c| !c.nodes.is_empty()) {
+                s += &format!("\n{} network: ", c.name);
+                s += &c
+                    .nodes
+                    .iter()
+                    .map(|(n, t)| format!("{n} {t:.2} °C"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                s += " · heat by surface: ";
+                s += &c
+                    .surfaces
+                    .iter()
+                    .map(|(n, q)| format!("{n} {q:.3} W"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                s += "\n";
+            }
             s += "\n";
+        }
+        if let Some(f) = &self.flow {
+            s += "## Flow\n\n";
+            s += &format!(
+                "Fluid: {} · turbulence: {} · {} iterations, {} (residuals mass {:.1e}, momentum {:.1e}, energy {:.1e}) · max speed {:.3} m/s\n\n",
+                f.fluid,
+                f.turbulence,
+                f.iterations,
+                if f.converged_by_monitors {
+                    "converged (key temperatures steady within 0.05 K or 0.2 % of their rise over 50 iterations)"
+                } else if f.converged {
+                    "converged"
+                } else {
+                    "**NOT converged**"
+                },
+                f.final_residuals[0],
+                f.final_residuals[1],
+                f.final_residuals[2],
+                f.max_speed_m_s
+            );
+            if !f.fans.is_empty() {
+                s += "| Fan | Flow [m³/s] | Flow [CFM] | Static pressure [Pa] |\n|---|---:|---:|---:|\n";
+                for fan in &f.fans {
+                    s += &format!(
+                        "| {} | {:.5} | {:.2} | {:.2} |\n",
+                        fan.name,
+                        fan.flow_m3_s,
+                        fan.flow_m3_s / 4.719_474e-4,
+                        fan.pressure_pa
+                    );
+                }
+                s += "\n";
+            }
+            if !f.openings.is_empty() {
+                s += "| Opening | In [m³/s] | Out [m³/s] | Heat carried out [W] |\n|---|---:|---:|---:|\n";
+                for o in &f.openings {
+                    s += &format!(
+                        "| {} | {:.5} | {:.5} | {:.3} |\n",
+                        o.name, o.inflow_m3_s, o.outflow_m3_s, o.heat_out_w
+                    );
+                }
+                s += "\n";
+            }
+            if !f.monitors.is_empty() {
+                s += "| Monitor | Position [mm] | T [°C] | Speed [m/s] |\n|---|---|---:|---:|\n";
+                for mo in &f.monitors {
+                    s += &format!(
+                        "| {} | ({:.1}, {:.1}, {:.1}) | {:.2} | {:.4} |\n",
+                        mo.name,
+                        mo.position_mm[0],
+                        mo.position_mm[1],
+                        mo.position_mm[2],
+                        mo.t_c,
+                        mo.speed_m_s
+                    );
+                }
+                s += "\n";
+            }
         }
         if !self.blocks.is_empty() {
             s += "## Blocks\n\n| Block | Material | P [W] | Tmin [°C] | Tavg [°C] | Tmax [°C] |\n|---|---|---:|---:|---:|---:|\n";
@@ -290,7 +416,15 @@ impl Report {
                 s += &format!("- {w}\n");
             }
         }
-        s += "\n_Phase 0 model: 3D conduction with convection/radiation boundary conditions; internal air conducts only (no flow), which is conservative for natural-convection cavities._\n";
+        if self.advected_out_w != 0.0 || self.radiated_out_w != 0.0 {
+            s += &format!(
+                "\nOf the heat out: {:.3} W carried by the air through openings, {:.3} W radiated through openings.\n",
+                self.advected_out_w, self.radiated_out_w
+            );
+        }
+        if self.flow.is_none() {
+            s += "\n_Conduction model: the air does not move (no [flow] section); valid and conservative for sealed natural-convection cavities only._\n";
+        }
         s
     }
 }
