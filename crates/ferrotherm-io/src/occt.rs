@@ -150,7 +150,8 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
     if glb.len() < 20 || &glb[..4] != b"glTF" {
         return Err("not a binary glTF".into());
     }
-    let u32_at = |o: usize| u32::from_le_bytes([glb[o], glb[o + 1], glb[o + 2], glb[o + 3]]) as usize;
+    let u32_at =
+        |o: usize| u32::from_le_bytes([glb[o], glb[o + 1], glb[o + 2], glb[o + 3]]) as usize;
     let mut off = 12;
     let mut json: Option<Value> = None;
     let mut bin: &[u8] = &[];
@@ -167,7 +168,12 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
         off = end;
     }
     let j = json.ok_or("glTF: no JSON chunk")?;
-    let arr = |k: &str| j.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let arr = |k: &str| {
+        j.get(k)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
     let nodes = arr("nodes");
     let meshes = arr("meshes");
     let accessors = arr("accessors");
@@ -194,8 +200,12 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
         let v = views
             .get(a["bufferView"].as_u64().ok_or("glTF: sparse accessor")? as usize)
             .ok_or("glTF: bad view")?;
-        let base = v["byteOffset"].as_u64().unwrap_or(0) as usize + a["byteOffset"].as_u64().unwrap_or(0) as usize;
-        let stride = v["byteStride"].as_u64().map(|s| s as usize).unwrap_or(comps * csize);
+        let base = v["byteOffset"].as_u64().unwrap_or(0) as usize
+            + a["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let stride = v["byteStride"]
+            .as_u64()
+            .map(|s| s as usize)
+            .unwrap_or(comps * csize);
         let mut out = Vec::with_capacity(count * comps);
         for e in 0..count {
             for c in 0..comps {
@@ -228,18 +238,38 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
         }
         let v3 = |k: &str, d: f64| -> V3 {
             let a = n[k].as_array();
-            let g = |i| a.and_then(|a| a.get(i)).and_then(|v: &Value| v.as_f64()).unwrap_or(d);
+            let g = |i| {
+                a.and_then(|a| a.get(i))
+                    .and_then(|v: &Value| v.as_f64())
+                    .unwrap_or(d)
+            };
             [g(0), g(1), g(2)]
         };
         let t = v3("translation", 0.0);
         let s = v3("scale", 1.0);
         let q = n["rotation"].as_array();
-        let qg = |i: usize, d: f64| q.and_then(|a| a.get(i)).and_then(|v| v.as_f64()).unwrap_or(d);
+        let qg = |i: usize, d: f64| {
+            q.and_then(|a| a.get(i))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(d)
+        };
         let (x, y, z, w) = (qg(0, 0.0), qg(1, 0.0), qg(2, 0.0), qg(3, 1.0));
         let r = [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            [
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y - z * w),
+                2.0 * (x * z + y * w),
+            ],
+            [
+                2.0 * (x * y + z * w),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z - x * w),
+            ],
+            [
+                2.0 * (x * z - y * w),
+                2.0 * (y * z + x * w),
+                1.0 - 2.0 * (x * x + y * y),
+            ],
         ];
         let mut rs = r;
         for row in rs.iter_mut() {
@@ -262,12 +292,20 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
         .as_array()
         .and_then(|s| s.get(j["scene"].as_u64().unwrap_or(0) as usize))
         .and_then(|s| s["nodes"].as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|x| x as usize)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|x| x as usize))
+                .collect()
+        })
         .unwrap_or_else(|| (0..nodes.len()).collect());
 
     let mut products = std::collections::HashSet::new();
     // (node, transform, names on the path)
-    let mut stack: Vec<(usize, Xf, Vec<String>)> = roots.iter().rev().map(|&r| (r, to_mm, Vec::new())).collect();
+    let mut stack: Vec<(usize, Xf, Vec<String>)> = roots
+        .iter()
+        .rev()
+        .map(|&r| (r, to_mm, Vec::new()))
+        .collect();
     let mut guard = 0usize;
     while let Some((ni, parent, mut names)) = stack.pop() {
         guard += 1;
@@ -284,19 +322,31 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
             let mname = mesh["name"].as_str().unwrap_or("").to_string();
             products.insert(mname.clone());
             let mut tris = Vec::new();
-            for p in mesh["primitives"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+            for p in mesh["primitives"]
+                .as_array()
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
                 if p["mode"].as_u64().unwrap_or(4) != 4 {
                     continue;
                 }
-                let Some(pi) = p["attributes"]["POSITION"].as_u64() else { continue };
+                let Some(pi) = p["attributes"]["POSITION"].as_u64() else {
+                    continue;
+                };
                 let (pos, c) = accessor(pi as usize)?;
                 if c != 3 {
                     continue;
                 }
                 let nv = pos.len() / 3;
-                let pts: Vec<V3> = (0..nv).map(|v| xf.apply([pos[3 * v], pos[3 * v + 1], pos[3 * v + 2]])).collect();
+                let pts: Vec<V3> = (0..nv)
+                    .map(|v| xf.apply([pos[3 * v], pos[3 * v + 1], pos[3 * v + 2]]))
+                    .collect();
                 let idx: Vec<usize> = match p["indices"].as_u64() {
-                    Some(ii) => accessor(ii as usize)?.0.into_iter().map(|x| x as usize).collect(),
+                    Some(ii) => accessor(ii as usize)?
+                        .0
+                        .into_iter()
+                        .map(|x| x as usize)
+                        .collect(),
                     None => (0..nv).collect(),
                 };
                 for t in idx.chunks_exact(3) {
@@ -329,7 +379,11 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
                 .or_else(|| meaningful(&mname).then(|| mname.clone()))
                 .or_else(|| names.first().filter(|s| meaningful(s)).cloned())
                 .unwrap_or_else(|| format!("body{}", model.bodies.len() + 1));
-            let mut path: Vec<&str> = names.iter().map(|s| s.as_str()).filter(|s| meaningful(s)).collect();
+            let mut path: Vec<&str> = names
+                .iter()
+                .map(|s| s.as_str())
+                .filter(|s| meaningful(s))
+                .collect();
             if meaningful(&mname) && path.last() != Some(&mname.as_str()) {
                 path.push(&mname);
             }
@@ -352,7 +406,9 @@ pub fn from_glb(glb: &[u8]) -> Result<StepModel, String> {
     }
     model.products = products.len();
     if model.bodies.is_empty() {
-        model.warnings.push("no solid bodies found in the STEP file".into());
+        model
+            .warnings
+            .push("no solid bodies found in the STEP file".into());
     }
     Ok(model)
 }

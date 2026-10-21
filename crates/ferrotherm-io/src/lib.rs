@@ -3,10 +3,13 @@
 
 //! Import and export for FerroTherm.
 
+// Geometry code indexes axes and matrix entries explicitly.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 pub mod archive;
 pub mod ecad;
-pub mod geom;
 pub mod export;
+pub mod geom;
 pub mod gerber;
 pub mod idf;
 pub mod import;

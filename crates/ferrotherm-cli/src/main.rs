@@ -69,6 +69,58 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show what a CAD file contains (STEP, STL, IDF, KiCad, Gerber, IPC-2581, ODB++).
+    CadInfo {
+        /// File, folder or archive
+        file: PathBuf,
+    },
+    /// Import CAD data into a case: a new one, or added to `--into`.
+    Import {
+        /// File, folder or archive (STEP, STL, IDF, KiCad, Gerber/Excellon, IPC-2581, ODB++)
+        file: PathBuf,
+        /// Existing case to add the geometry to
+        #[arg(long)]
+        into: Option<PathBuf>,
+        /// Output case (default: the --into case, or <file name>.toml)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Where the imported geometry goes: board corner (ECAD) or offset (MCAD), mm "x,y,z"
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        origin: Option<Vec<f64>>,
+        /// ECAD: PCB conductivity-map tile size, mm (0 = single block)
+        #[arg(long, default_value_t = 10.0)]
+        tile: f64,
+        /// ECAD: power list CSV (refdes, power_W [, Rjc, Rjb, Tj_max])
+        #[arg(long)]
+        power: Option<PathBuf>,
+        /// ECAD: components as "compact" (2R when Rjc known), "blocks" or "none"
+        #[arg(long, default_value = "compact")]
+        components: String,
+        /// ECAD: ignore parts with a smaller footprint, mm²
+        #[arg(long, default_value_t = 4.0)]
+        min_area: f64,
+        /// MCAD: "box" (bounding box per body) or "voxel:<mm>" (voxelised shape)
+        #[arg(long, default_value = "box")]
+        shape: String,
+        /// MCAD: material of the imported bodies
+        #[arg(long, default_value = "al-6061-t6")]
+        material: String,
+        /// STEP chordal tolerance, mm
+        #[arg(long, default_value_t = 0.1)]
+        tolerance: f64,
+        /// Name prefix for the created objects
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Do not grow the domain to fit the imported geometry
+        #[arg(long)]
+        no_fit: bool,
+    },
+    /// Export the case geometry: STEP (AP214 solids), STL or IDF 3.0 (.emn + .emp).
+    Export {
+        case: PathBuf,
+        /// Output file; format from the extension (.step/.stp, .stl, .emn)
+        out: PathBuf,
+    },
     /// Effective conductivity of a PCB stack-up.
     Pcb {
         /// Board thickness, mm
@@ -108,6 +160,98 @@ fn load(case_path: &Path, extra: &[PathBuf]) -> Result<Simulation> {
         lib.merge_file(p)?;
     }
     Ok(Simulation::with_library(case, lib)?)
+}
+
+fn parse_shape(s: &str) -> Result<ferrotherm_io::step::BlockMode> {
+    use ferrotherm_io::step::BlockMode;
+    if s == "box" {
+        return Ok(BlockMode::BoundingBox);
+    }
+    if let Some(v) = s.strip_prefix("voxel:") {
+        return Ok(BlockMode::Voxels(v.parse().context("--shape voxel:<mm>")?));
+    }
+    anyhow::bail!("--shape: use \"box\" or \"voxel:<mm>\"")
+}
+
+/// Minimal case around imported geometry: still air, natural-convection
+/// walls (h = 10 W/m²K at 25 °C) — to be edited by the user.
+fn new_case_for(file: &Path, fr: &ferrotherm_io::ecad::Fragment) -> Case {
+    let title = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "imported".into());
+    let (lo, hi) = if fr.min[0].is_finite() {
+        (fr.min, fr.max)
+    } else {
+        ([0.0; 3], [100.0; 3])
+    };
+    let mut text = format!(
+        "[meta]\ntitle = \"{}\"\nauthor = \"Roany Romano\"\ndescription = \"imported from {}\"\n\n[domain]\nmin = [{}, {}, {}]\nmax = [{}, {}, {}]\nmaterial = \"air-still\"\n\n[grid]\nmax_cell_mm = 2.0\n",
+        title.replace('"', "'"),
+        file.file_name().map(|s| s.to_string_lossy().replace('"', "'")).unwrap_or_default(),
+        lo[0] - 10.0,
+        lo[1] - 10.0,
+        lo[2] - 10.0,
+        hi[0] + 10.0,
+        hi[1] + 10.0,
+        hi[2] + 10.0
+    );
+    for f in ["xmin", "xmax", "ymin", "ymax", "zmin", "zmax"] {
+        text += &format!("\n[[boundaries]]\nname = \"{f}\"\nface = \"{f}\"\ntype = \"convection\"\nh = 10.0\nt_ambient_c = 25.0\n");
+    }
+    Case::from_toml(&text).expect("template case")
+}
+
+fn cad_info(file: &Path) -> Result<()> {
+    use ferrotherm_io::import::{self, Imported};
+    let (src, imp) = import::import_path(file, 0.1).map_err(anyhow::Error::msg)?;
+    println!("format: {}", src.label());
+    match imp {
+        Imported::Board(mut b) => {
+            let s = b.summary();
+            println!("board: {} ({})", s.name, s.format);
+            println!(
+                "size: {:.2} × {:.2} mm, thickness {:.3} mm",
+                s.size_mm[0], s.size_mm[1], s.thickness_mm
+            );
+            for (n, t, c) in &s.copper_layers {
+                println!(
+                    "  copper {n:<20} {:.0} µm  coverage {:.1} %",
+                    t * 1000.0,
+                    c * 100.0
+                );
+            }
+            println!("components: {}, drills: {}", s.components, s.drills);
+            for w in &s.warnings {
+                println!("warning: {w}");
+            }
+        }
+        Imported::Mcad(m) => {
+            println!(
+                "{} bodies, {} products, {} occurrences",
+                m.bodies.len(),
+                m.products,
+                m.occurrences
+            );
+            for b in &m.bodies {
+                println!(
+                    "  {:<24} [{:.2}, {:.2}, {:.2}] .. [{:.2}, {:.2}, {:.2}] mm  {} triangles",
+                    b.name,
+                    b.min[0],
+                    b.min[1],
+                    b.min[2],
+                    b.max[0],
+                    b.max[1],
+                    b.max[2],
+                    b.tris.len()
+                );
+            }
+            for w in &m.warnings {
+                println!("warning: {w}");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -290,6 +434,123 @@ fn main() -> Result<()> {
             for d in &lib.derating {
                 println!("{:<28} Tj ≤ {:>5.1} °C  {}", d.id, d.tj_max_c, d.source);
             }
+        }
+        Cmd::CadInfo { file } => cad_info(&file)?,
+        Cmd::Import {
+            file,
+            into,
+            out,
+            origin,
+            tile,
+            power,
+            components,
+            min_area,
+            shape,
+            material,
+            tolerance,
+            prefix,
+            no_fit,
+        } => {
+            use ferrotherm_io::import::{self, Imported};
+            let (src, imp) = import::import_path(&file, tolerance).map_err(anyhow::Error::msg)?;
+            let origin = match origin {
+                Some(o) if o.len() == 3 => Some([o[0], o[1], o[2]]),
+                Some(_) => anyhow::bail!("--origin needs three values: x,y,z"),
+                None => None,
+            };
+            let fr = match imp {
+                Imported::Board(mut b) => {
+                    if let Some(p) = &power {
+                        let n = ferrotherm_io::ecad::apply_power_csv(
+                            &mut b,
+                            &std::fs::read_to_string(p)?,
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                        eprintln!("power list: {n} parts");
+                    }
+                    let opt = ferrotherm_io::ecad::ToCaseOptions {
+                        tile_mm: tile,
+                        origin: origin.unwrap_or([0.0; 3]),
+                        components: match components.as_str() {
+                            "blocks" => ferrotherm_io::ecad::ComponentMode::Blocks,
+                            "none" => ferrotherm_io::ecad::ComponentMode::None,
+                            "compact" => ferrotherm_io::ecad::ComponentMode::Compact,
+                            o => anyhow::bail!("--components: unknown mode '{o}'"),
+                        },
+                        min_area_mm2: min_area,
+                        prefix: prefix.clone(),
+                        ..Default::default()
+                    };
+                    import::board_fragment(&mut b, &opt)
+                }
+                Imported::Mcad(m) => {
+                    let mode = parse_shape(&shape)?;
+                    for w in &m.warnings {
+                        eprintln!("warning: {w}");
+                    }
+                    import::mcad_to_fragment(
+                        &m,
+                        &import::McadOptions {
+                            mode,
+                            material: material.clone(),
+                            offset: origin.unwrap_or([0.0; 3]),
+                            prefix: prefix.clone(),
+                            ..Default::default()
+                        },
+                    )
+                }
+            };
+            let (nb, nc) = (fr.blocks.len(), fr.components.len());
+            let mut case = match &into {
+                Some(p) => Case::from_file(p)?,
+                None => new_case_for(&file, &fr),
+            };
+            let notes = import::merge_into_case(&mut case, fr, !no_fit, 10.0);
+            let explicit = out.is_some() || into.is_some();
+            let out = out.or(into).unwrap_or_else(|| file.with_extension("toml"));
+            if !explicit && out.exists() {
+                anyhow::bail!(
+                    "{} already exists: choose the output with -o",
+                    out.display()
+                );
+            }
+            std::fs::write(&out, case.to_toml()?)?;
+            println!(
+                "{}: {nb} blocks, {nc} components -> {}",
+                src.label(),
+                out.display()
+            );
+            for n in notes {
+                println!("note: {n}");
+            }
+        }
+        Cmd::Export { case, out } => {
+            let sim = load(&case, &cli.libraries)?;
+            let ext = out
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            match ext.as_str() {
+                "step" | "stp" => std::fs::write(
+                    &out,
+                    ferrotherm_io::export::case_to_step(&sim.case, &sim.library)
+                        .map_err(anyhow::Error::msg)?,
+                )?,
+                "stl" => std::fs::write(
+                    &out,
+                    ferrotherm_io::export::case_to_stl(&sim.case, &sim.library)
+                        .map_err(anyhow::Error::msg)?,
+                )?,
+                "emn" | "idf" => {
+                    let (emn, emp) = ferrotherm_io::export::case_to_idf(&sim.case, &sim.library)
+                        .map_err(anyhow::Error::msg)?;
+                    std::fs::write(out.with_extension("emn"), emn)?;
+                    std::fs::write(out.with_extension("emp"), emp)?;
+                }
+                _ => anyhow::bail!("unknown export format '.{ext}' (use .step, .stl or .emn)"),
+            }
+            println!("wrote {}", out.display());
         }
         Cmd::Pcb {
             thickness,

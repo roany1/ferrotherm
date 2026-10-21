@@ -47,9 +47,12 @@ fn polygon(ctx: &Ctx, p: &XNode) -> Vec<P2> {
                 }
             }
             "PolyStepCurve" => {
-                let (Some(x), Some(y), Some(cx), Some(cy)) =
-                    (ctx.s(st, "x"), ctx.s(st, "y"), ctx.s(st, "centerX"), ctx.s(st, "centerY"))
-                else {
+                let (Some(x), Some(y), Some(cx), Some(cy)) = (
+                    ctx.s(st, "x"),
+                    ctx.s(st, "y"),
+                    ctx.s(st, "centerX"),
+                    ctx.s(st, "centerY"),
+                ) else {
                     continue;
                 };
                 let Some(prev) = pts.last().copied() else {
@@ -103,7 +106,11 @@ fn line_width(ctx: &Ctx, n: &XNode) -> f64 {
         return ctx.s(ld, "lineWidth").unwrap_or(0.0);
     }
     if let Some(r) = n.child("LineDescRef") {
-        return r.attr("id").and_then(|id| ctx.line_w.get(id)).copied().unwrap_or(0.0);
+        return r
+            .attr("id")
+            .and_then(|id| ctx.line_w.get(id))
+            .copied()
+            .unwrap_or(0.0);
     }
     0.0
 }
@@ -168,9 +175,12 @@ fn xform(n: &XNode) -> (f64, bool) {
 fn draw_features(ctx: &Ctx, n: &XNode, r: &mut Raster, drills: &mut Vec<Drill>) {
     match n.name.as_str() {
         "Line" => {
-            if let (Some(sx), Some(sy), Some(ex), Some(ey)) =
-                (ctx.s(n, "startX"), ctx.s(n, "startY"), ctx.s(n, "endX"), ctx.s(n, "endY"))
-            {
+            if let (Some(sx), Some(sy), Some(ex), Some(ey)) = (
+                ctx.s(n, "startX"),
+                ctx.s(n, "startY"),
+                ctx.s(n, "endX"),
+                ctx.s(n, "endY"),
+            ) {
                 let w = line_width(ctx, n);
                 if w > 0.0 {
                     r.segment([sx, sy], [ex, ey], w, true);
@@ -235,9 +245,16 @@ fn draw_features(ctx: &Ctx, n: &XNode, r: &mut Raster, drills: &mut Vec<Drill>) 
             }
         }
         "Hole" => {
-            if let (Some(x), Some(y), Some(d)) = (ctx.s(n, "x"), ctx.s(n, "y"), ctx.s(n, "diameter")) {
+            if let (Some(x), Some(y), Some(d)) =
+                (ctx.s(n, "x"), ctx.s(n, "y"), ctx.s(n, "diameter"))
+            {
                 let plated = !matches!(n.attr("platingStatus"), Some("NONPLATED"));
-                drills.push(Drill { x, y, d_mm: d, plated });
+                drills.push(Drill {
+                    x,
+                    y,
+                    d_mm: d,
+                    plated,
+                });
             }
         }
         _ => {
@@ -251,7 +268,10 @@ fn draw_features(ctx: &Ctx, n: &XNode, r: &mut Raster, drills: &mut Vec<Drill>) 
 pub fn read(text: &str) -> Result<Board, String> {
     let root = parse(text)?;
     if root.name != "IPC-2581" {
-        return Err(format!("not an IPC-2581 file (root element <{}>)", root.name));
+        return Err(format!(
+            "not an IPC-2581 file (root element <{}>)",
+            root.name
+        ));
     }
     let rev = root.attr("revision").unwrap_or("?").to_string();
     let mut board = Board {
@@ -259,7 +279,10 @@ pub fn read(text: &str) -> Result<Board, String> {
         ..Default::default()
     };
     let ecad = root.find("Ecad").ok_or("no <Ecad> section")?;
-    let units = ecad.find("CadHeader").and_then(|h| h.attr("units")).unwrap_or("MILLIMETER");
+    let units = ecad
+        .find("CadHeader")
+        .and_then(|h| h.attr("units"))
+        .unwrap_or("MILLIMETER");
     let scale = match units {
         "INCH" => 25.4,
         "MICRON" => 1e-3,
@@ -277,7 +300,10 @@ pub fn read(text: &str) -> Result<Board, String> {
         c.descendants("EntryStandard", &mut entries);
         c.descendants("EntryUser", &mut entries);
         for e in entries {
-            if let (Some(id), Some(s)) = (e.attr("id"), e.children.iter().find_map(|ch| shape_def(&ctx, ch))) {
+            if let (Some(id), Some(s)) = (
+                e.attr("id"),
+                e.children.iter().find_map(|ch| shape_def(&ctx, ch)),
+            ) {
                 ctx.shapes.insert(id.to_string(), s);
             }
         }
@@ -285,7 +311,8 @@ pub fn read(text: &str) -> Result<Board, String> {
         c.descendants("EntryLineDesc", &mut lds);
         for e in lds {
             if let (Some(id), Some(ld)) = (e.attr("id"), e.child("LineDesc")) {
-                ctx.line_w.insert(id.to_string(), ctx.s(ld, "lineWidth").unwrap_or(0.0));
+                ctx.line_w
+                    .insert(id.to_string(), ctx.s(ld, "lineWidth").unwrap_or(0.0));
             }
         }
     }
@@ -297,12 +324,20 @@ pub fn read(text: &str) -> Result<Board, String> {
         if let Some(n) = l.attr("name") {
             layer_fn.insert(
                 n.to_string(),
-                (l.attr("layerFunction").unwrap_or("").to_string(), l.attr("side").unwrap_or("").to_string()),
+                (
+                    l.attr("layerFunction").unwrap_or("").to_string(),
+                    l.attr("side").unwrap_or("").to_string(),
+                ),
             );
             layer_order.push(n.to_string());
         }
     }
-    let is_copper = |f: &str| matches!(f, "CONDUCTOR" | "SIGNAL" | "PLANE" | "MIXED" | "CONDFILM" | "CONDFOIL");
+    let is_copper = |f: &str| {
+        matches!(
+            f,
+            "CONDUCTOR" | "SIGNAL" | "PLANE" | "MIXED" | "CONDFILM" | "CONDFOIL"
+        )
+    };
     let is_diel = |f: &str| f.starts_with("DIEL");
     // stack-up
     let mut stack: Vec<(String, f64, i64)> = Vec::new();
@@ -312,11 +347,18 @@ pub fn read(text: &str) -> Result<Board, String> {
         su.descendants("StackupLayer", &mut ls);
         for (k, l) in ls.iter().enumerate() {
             let name = l.attr("layerOrGroupRef").unwrap_or("").to_string();
-            stack.push((name, l.num("thickness").unwrap_or(0.0) * scale, l.num("sequence").map(|s| s as i64).unwrap_or(k as i64)));
+            stack.push((
+                name,
+                l.num("thickness").unwrap_or(0.0) * scale,
+                l.num("sequence").map(|s| s as i64).unwrap_or(k as i64),
+            ));
         }
         stack.sort_by_key(|s| s.2);
         if board.thickness_mm.is_none() {
-            board.thickness_mm = su.find("StackupGroup").and_then(|g| g.num("thickness")).map(|t| t * scale);
+            board.thickness_mm = su
+                .find("StackupGroup")
+                .and_then(|g| g.num("thickness"))
+                .map(|t| t * scale);
         }
     }
     let step = cad.find("Step").ok_or("no <Step>")?;
@@ -326,7 +368,9 @@ pub fn read(text: &str) -> Result<Board, String> {
         board.outline = contours(&ctx, p);
     }
     if board.outline.is_empty() {
-        board.warnings.push("no board Profile; using the copper/component extent".into());
+        board
+            .warnings
+            .push("no board Profile; using the copper/component extent".into());
     }
     // packages
     let mut pkgs: HashMap<String, ((P2, P2), Option<f64>)> = HashMap::new();
@@ -366,7 +410,9 @@ pub fn read(text: &str) -> Result<Board, String> {
             pl.local_bbox = Some(*bb);
             pl.height_mm = *h;
         } else {
-            board.warnings.push(format!("{refdes}: package '{pkg}' not defined"));
+            board
+                .warnings
+                .push(format!("{refdes}: package '{pkg}' not defined"));
         }
         board.components.push(pl);
     }
@@ -375,7 +421,9 @@ pub fn read(text: &str) -> Result<Board, String> {
     let mut copper: HashMap<String, Raster> = HashMap::new();
     let mut drills = Vec::new();
     for lf in step.children("LayerFeature") {
-        let Some(lr) = lf.attr("layerRef") else { continue };
+        let Some(lr) = lf.attr("layerRef") else {
+            continue;
+        };
         let f = layer_fn.get(lr).map(|x| x.0.as_str()).unwrap_or("");
         if is_copper(f) {
             let r = copper.entry(lr.to_string()).or_insert_with(|| {
@@ -396,7 +444,9 @@ pub fn read(text: &str) -> Result<Board, String> {
         stack.iter().map(|s| s.0.clone()).collect()
     };
     for name in order {
-        let Some((f, _)) = layer_fn.get(&name) else { continue };
+        let Some((f, _)) = layer_fn.get(&name) else {
+            continue;
+        };
         let t = stack.iter().find(|s| s.0 == name).map(|s| s.1);
         if is_copper(f) {
             board.layers.push(Layer {
@@ -510,7 +560,10 @@ mod tests {
         assert!((a / exact - 1.0).abs() < 2e-3, "{a} {exact}");
         // F.Cu: line 30x1 + caps + 1x2 pad = 30 + pi/4 + 2 mm²
         let fcu = s.copper_layers[0].2 * exact;
-        assert!((fcu - (32.0 + std::f64::consts::FRAC_PI_4)).abs() < 1.0, "{fcu}");
+        assert!(
+            (fcu - (32.0 + std::f64::consts::FRAC_PI_4)).abs() < 1.0,
+            "{fcu}"
+        );
         // B.Cu: plane with a 10x10 cut-out, clipped to the outline
         let bcu = s.copper_layers[1].2 * exact;
         assert!((bcu - (exact - 100.0)).abs() < 3.0, "{bcu}");

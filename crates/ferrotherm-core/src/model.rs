@@ -409,15 +409,22 @@ impl Model {
             if let Some(net) = &c.network {
                 // inner/outer split and lead ring need their own planes
                 let t = tangential(c.normal);
-                let inner = net.inner_size_mm.map(|s| [s[0] * MM, s[1] * MM]).unwrap_or([
-                    0.5 * (c.hi[t[0]] - c.lo[t[0]]),
-                    0.5 * (c.hi[t[1]] - c.lo[t[1]]),
-                ]);
+                let inner = net
+                    .inner_size_mm
+                    .map(|s| [s[0] * MM, s[1] * MM])
+                    .unwrap_or([
+                        0.5 * (c.hi[t[0]] - c.lo[t[0]]),
+                        0.5 * (c.hi[t[1]] - c.lo[t[1]]),
+                    ]);
                 for q in 0..2 {
                     let mid = 0.5 * (c.lo[t[q]] + c.hi[t[q]]);
                     planes[t[q]].push(mid - 0.5 * inner[q]);
                     planes[t[q]].push(mid + 0.5 * inner[q]);
-                    if net.nodes.iter().any(|n| n.surface == Some(SurfaceKind::Leads)) {
+                    if net
+                        .nodes
+                        .iter()
+                        .any(|n| n.surface == Some(SurfaceKind::Leads))
+                    {
                         planes[t[q]].push(c.lo[t[q]] - net.lead_ring_mm * MM);
                         planes[t[q]].push(c.hi[t[q]] + net.lead_ring_mm * MM);
                     }
@@ -705,33 +712,34 @@ impl Model {
                 )));
             }
             // cells of the top or bottom layer, optionally limited to the inner/outer part
-            let layer_cells = |top: bool, part: Option<(bool, [f64; 2])>| -> Vec<(usize, [usize; 3])> {
-                let layer = if top { a1 - 1 } else { a0 };
-                let mut cells = Vec::new();
-                for vv in v0..v1 {
-                    for uu in u0..u1 {
-                        let mut p = [0usize; 3];
-                        p[a] = layer;
-                        p[t[0]] = uu;
-                        p[t[1]] = vv;
-                        let c = grid.idx(p[0], p[1], p[2]);
-                        if owner[c] != Owner::Component(ci) {
-                            continue;
-                        }
-                        if let Some((inner, size)) = part {
-                            let mid0 = 0.5 * (cd.lo[t[0]] + cd.hi[t[0]]);
-                            let mid1 = 0.5 * (cd.lo[t[1]] + cd.hi[t[1]]);
-                            let inside = (grid.center(t[0], uu) - mid0).abs() < 0.5 * size[0]
-                                && (grid.center(t[1], vv) - mid1).abs() < 0.5 * size[1];
-                            if inside != inner {
+            let layer_cells =
+                |top: bool, part: Option<(bool, [f64; 2])>| -> Vec<(usize, [usize; 3])> {
+                    let layer = if top { a1 - 1 } else { a0 };
+                    let mut cells = Vec::new();
+                    for vv in v0..v1 {
+                        for uu in u0..u1 {
+                            let mut p = [0usize; 3];
+                            p[a] = layer;
+                            p[t[0]] = uu;
+                            p[t[1]] = vv;
+                            let c = grid.idx(p[0], p[1], p[2]);
+                            if owner[c] != Owner::Component(ci) {
                                 continue;
                             }
+                            if let Some((inner, size)) = part {
+                                let mid0 = 0.5 * (cd.lo[t[0]] + cd.hi[t[0]]);
+                                let mid1 = 0.5 * (cd.lo[t[1]] + cd.hi[t[1]]);
+                                let inside = (grid.center(t[0], uu) - mid0).abs() < 0.5 * size[0]
+                                    && (grid.center(t[1], vv) - mid1).abs() < 0.5 * size[1];
+                                if inside != inner {
+                                    continue;
+                                }
+                            }
+                            cells.push((c, p));
                         }
-                        cells.push((c, p));
                     }
-                }
-                cells
-            };
+                    cells
+                };
             // connect `node` to the outside neighbours of `cells` across axis `ax`
             // in direction `dir` (+1/−1); `r_spread` = resistance distributed by area
             let mut attach = |node: usize,
@@ -777,7 +785,11 @@ impl Model {
                             }
                         }
                     } else {
-                        let nb = if dir > 0 { c + stride[ax] } else { c - stride[ax] };
+                        let nb = if dir > 0 {
+                            c + stride[ax]
+                        } else {
+                            c - stride[ax]
+                        };
                         let pn = grid.ijk(nb);
                         let d_nb = grid.width(ax, pn[ax]);
                         let gl = 1.0 / (r_i + 0.5 * d_nb / (k[nb][ax] * ai));
@@ -844,10 +856,13 @@ impl Model {
                             g: 1.0 / l.r,
                         });
                     }
-                    let inner = net.inner_size_mm.map(|s| [s[0] * MM, s[1] * MM]).unwrap_or([
-                        0.5 * (cd.hi[t[0]] - cd.lo[t[0]]),
-                        0.5 * (cd.hi[t[1]] - cd.lo[t[1]]),
-                    ]);
+                    let inner = net
+                        .inner_size_mm
+                        .map(|s| [s[0] * MM, s[1] * MM])
+                        .unwrap_or([
+                            0.5 * (cd.hi[t[0]] - cd.lo[t[0]]),
+                            0.5 * (cd.hi[t[1]] - cd.lo[t[1]]),
+                        ]);
                     for nn in &net.nodes {
                         let Some(kind) = nn.surface else { continue };
                         let node = node_of(&nn.name);
@@ -857,19 +872,36 @@ impl Model {
                             SurfaceKind::Top | SurfaceKind::Bottom => {
                                 let top = kind == SurfaceKind::Top;
                                 let cells = layer_cells(top, None);
-                                attach(node, &cells, a, if top { 1 } else { -1 }, None, surf, &mut links, &mut boundary, &mut info)?;
+                                attach(
+                                    node,
+                                    &cells,
+                                    a,
+                                    if top { 1 } else { -1 },
+                                    None,
+                                    surf,
+                                    &mut links,
+                                    &mut boundary,
+                                    &mut info,
+                                )?;
                             }
                             SurfaceKind::TopInner
                             | SurfaceKind::TopOuter
                             | SurfaceKind::BottomInner
                             | SurfaceKind::BottomOuter => {
-                                let top = matches!(kind, SurfaceKind::TopInner | SurfaceKind::TopOuter);
-                                let is_inner = matches!(kind, SurfaceKind::TopInner | SurfaceKind::BottomInner);
+                                let top =
+                                    matches!(kind, SurfaceKind::TopInner | SurfaceKind::TopOuter);
+                                let is_inner = matches!(
+                                    kind,
+                                    SurfaceKind::TopInner | SurfaceKind::BottomInner
+                                );
                                 let mut cells = layer_cells(top, Some((is_inner, inner)));
                                 if cells.is_empty() && is_inner {
                                     // inner region smaller than one cell: use the centre cell
                                     let all = layer_cells(top, None);
-                                    let mid = [0.5 * (cd.lo[t[0]] + cd.hi[t[0]]), 0.5 * (cd.lo[t[1]] + cd.hi[t[1]])];
+                                    let mid = [
+                                        0.5 * (cd.lo[t[0]] + cd.hi[t[0]]),
+                                        0.5 * (cd.lo[t[1]] + cd.hi[t[1]]),
+                                    ];
                                     if let Some(best) = all.iter().min_by(|x, y| {
                                         let dx = |q: &(usize, [usize; 3])| {
                                             (grid.center(t[0], q.1[t[0]]) - mid[0]).powi(2)
@@ -880,7 +912,17 @@ impl Model {
                                         cells.push(*best);
                                     }
                                 }
-                                attach(node, &cells, a, if top { 1 } else { -1 }, None, surf, &mut links, &mut boundary, &mut info)?;
+                                attach(
+                                    node,
+                                    &cells,
+                                    a,
+                                    if top { 1 } else { -1 },
+                                    None,
+                                    surf,
+                                    &mut links,
+                                    &mut boundary,
+                                    &mut info,
+                                )?;
                             }
                             SurfaceKind::Sides => {
                                 for ax in t {
@@ -889,7 +931,8 @@ impl Model {
                                         let (r0, r1) = if ax == t[0] { (u0, u1) } else { (v0, v1) };
                                         let layer = if dir > 0 { r1 - 1 } else { r0 };
                                         let other = if ax == t[0] { t[1] } else { t[0] };
-                                        let (o0, o1) = if other == t[0] { (u0, u1) } else { (v0, v1) };
+                                        let (o0, o1) =
+                                            if other == t[0] { (u0, u1) } else { (v0, v1) };
                                         for aa in a0..a1 {
                                             for oo in o0..o1 {
                                                 let mut p = [0usize; 3];
@@ -903,7 +946,17 @@ impl Model {
                                             }
                                         }
                                         if !cells.is_empty() {
-                                            attach(node, &cells, ax, dir, None, surf, &mut links, &mut boundary, &mut info)?;
+                                            attach(
+                                                node,
+                                                &cells,
+                                                ax,
+                                                dir,
+                                                None,
+                                                surf,
+                                                &mut links,
+                                                &mut boundary,
+                                                &mut info,
+                                            )?;
                                         }
                                     }
                                 }
@@ -917,8 +970,10 @@ impl Model {
                                     continue;
                                 }
                                 let ring = net.lead_ring_mm * MM;
-                                let (r00, r01) = grid.range(t[0], cd.lo[t[0]] - ring, cd.hi[t[0]] + ring);
-                                let (r10, r11) = grid.range(t[1], cd.lo[t[1]] - ring, cd.hi[t[1]] + ring);
+                                let (r00, r01) =
+                                    grid.range(t[0], cd.lo[t[0]] - ring, cd.hi[t[0]] + ring);
+                                let (r10, r11) =
+                                    grid.range(t[1], cd.lo[t[1]] - ring, cd.hi[t[1]] + ring);
                                 let layer = a0 - 1;
                                 let mut a_tot = 0.0;
                                 let mut cells = Vec::new();
@@ -947,7 +1002,11 @@ impl Model {
                                     let pn = grid.ijk(c);
                                     let gl = k[c][a] * ai / (0.5 * grid.width(a, pn[a]));
                                     info.links.push((links.len(), surf));
-                                    links.push(Link { a: node, b: c, g: gl });
+                                    links.push(Link {
+                                        a: node,
+                                        b: c,
+                                        g: gl,
+                                    });
                                 }
                             }
                         }
@@ -1007,7 +1066,7 @@ impl Model {
             ));
         }
         for (bi, b) in case.boundaries.iter().enumerate() {
-            let touches = face_bc[face_index(b.face)].iter().any(|v| *v == bi as i32);
+            let touches = face_bc[face_index(b.face)].contains(&(bi as i32));
             if !touches && !matches!(b.kind, BoundaryKind::Adiabatic | BoundaryKind::Symmetry) {
                 warnings.push(format!(
                     "boundary '{}' does not touch any cell (covered by a later boundary?)",
@@ -1069,7 +1128,10 @@ impl Model {
 
     /// Boundary elements with the half-cell resistance updated for the
     /// current conductivity (k(T) materials); borrowed when unchanged.
-    pub fn boundary_at<'s>(&'s self, k_now: &[[f64; 3]]) -> std::borrow::Cow<'s, [BoundaryElement]> {
+    pub fn boundary_at<'s>(
+        &'s self,
+        k_now: &[[f64; 3]],
+    ) -> std::borrow::Cow<'s, [BoundaryElement]> {
         if !self.has_kt {
             return std::borrow::Cow::Borrowed(&self.boundary);
         }
@@ -1125,7 +1187,9 @@ fn validate_network(name: &str, net: &Network) -> Result<()> {
     sorted.sort();
     sorted.dedup();
     if sorted.len() != names.len() {
-        return Err(Error::Invalid(format!("component '{name}': duplicate network node names")));
+        return Err(Error::Invalid(format!(
+            "component '{name}': duplicate network node names"
+        )));
     }
     for l in &net.links {
         if !names.contains(&l.a.as_str()) || !names.contains(&l.b.as_str()) {

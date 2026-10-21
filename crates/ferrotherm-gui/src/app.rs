@@ -4,6 +4,8 @@
 //! Application state and layout.
 
 use crate::colormap::Palette;
+use crate::flow_ui;
+use crate::import_ui::{self, ImportDialog};
 use crate::inspector;
 use crate::results::{self, FAIL, PASS, WARN};
 use crate::view3d::{self, box_quads, shade, Clip, Layer, Preset, Quad, Tag, Viewport};
@@ -11,8 +13,10 @@ use eframe::egui::{
     self, Align2, Color32, ComboBox, FontId, Key, KeyboardShortcut, Modifiers, RichText, Stroke,
     Ui, ViewportCommand,
 };
-use ferrotherm_core::case::{Block, Boundary, BoundaryKind, Component, Face};
-use ferrotherm_core::model::{component_box, Model, Owner};
+use ferrotherm_core::case::{
+    Block, Boundary, BoundaryKind, Component, Face, Fan, HeatSink, Loss, Monitor, Resistance,
+};
+use ferrotherm_core::model::{component_box, BlockOrigin, Model, Owner};
 use ferrotherm_core::report::Report;
 use ferrotherm_core::simulate::{Event, RunResult};
 use ferrotherm_core::{Case, Library, Simulation};
@@ -71,9 +75,23 @@ pub enum Sel {
     Grid,
     Environment,
     Solver,
+    Flow,
+    Radiation,
     Block(usize),
     Component(usize),
     Boundary(usize),
+    Fan(usize),
+    Resistance(usize),
+    HeatSink(usize),
+    Monitor(usize),
+}
+
+/// Field shown in the results view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Field {
+    Temperature,
+    Speed,
+    Pressure,
 }
 
 /// A finished solution, independent of later edits to the case.
@@ -101,6 +119,11 @@ enum Msg {
     Step {
         step: usize,
         steps: usize,
+    },
+    Flow {
+        iteration: usize,
+        max_iterations: usize,
+        residuals: [f64; 3],
     },
     Solved(Box<Solved>),
     Failed(String),
@@ -138,6 +161,7 @@ enum ViewMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BottomTab {
     Results,
+    Convergence,
     Messages,
 }
 
@@ -178,6 +202,7 @@ struct CacheKey {
     clip: (bool, usize, u64, bool),
     hidden: Vec<bool>,
     show_air: bool,
+    field: Field,
 }
 
 struct ResultCache {
@@ -225,6 +250,20 @@ pub struct FerroApp {
     allow_close: bool,
     bottom: BottomTab,
     title: String,
+    field: Field,
+    vectors: bool,
+    vector_density: usize,
+    /// Live flow residuals of the running solve: (iteration, [mass, momentum, energy]).
+    live_residuals: Vec<(usize, [f64; 3])>,
+    import: Option<ImportDialog>,
+}
+
+/// Axis-aligned box (min, max) in mm.
+type BoxMm = ([f64; 3], [f64; 3]);
+
+/// Index of the cell containing `x` (grid node coordinates, m).
+fn locate(nodes: &[f64], x: f64) -> usize {
+    nodes.partition_point(|&v| v <= x).saturating_sub(1)
 }
 
 fn dir_of(path: &Option<PathBuf>) -> PathBuf {
@@ -281,13 +320,32 @@ impl FerroApp {
             allow_close: false,
             bottom: BottomTab::Messages,
             title: String::new(),
+            field: Field::Temperature,
+            vectors: true,
+            vector_density: 30,
+            live_residuals: Vec::new(),
+            import: None,
         };
         app.info(format!(
             "FerroTherm {} — author Roany Romano. Loaded the example model; F5 solves.",
             env!("CARGO_PKG_VERSION")
         ));
         if let Some(p) = path {
-            app.open_path(&p);
+            let is_toml = p
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+            if !is_toml && import_ui::is_cad(&p) {
+                // `ferrotherm-gui board.kicad_pcb`: start a new model and import
+                let c = Case::from_toml(NEW_CASE).expect("new case parses");
+                app.set_case(c, None);
+                app.case.blocks.clear();
+                app.case.components.clear();
+                app.hidden.clear();
+                app.last_json = serde_json::to_string(&app.case).unwrap_or_default();
+                app.open_import(p, &cc.egui_ctx);
+            } else {
+                app.open_path(&p);
+            }
         }
         app.reset_clip_pos();
         app
@@ -385,6 +443,10 @@ impl FerroApp {
             Sel::Block(i) => i < self.case.blocks.len(),
             Sel::Component(i) => i < self.case.components.len(),
             Sel::Boundary(i) => i < self.case.boundaries.len(),
+            Sel::Fan(i) => i < self.case.fans.len(),
+            Sel::Resistance(i) => i < self.case.resistances.len(),
+            Sel::HeatSink(i) => i < self.case.heatsinks.len(),
+            Sel::Monitor(i) => i < self.case.monitors.len(),
             _ => true,
         };
         if !ok {
@@ -536,6 +598,71 @@ impl FerroApp {
         }
     }
 
+    fn import_file(&mut self, ctx: &egui::Context, folder: bool) {
+        let d = rfd::FileDialog::new().set_directory(dir_of(&self.path));
+        let p = if folder {
+            d.pick_folder()
+        } else {
+            import_ui::file_filters(d).pick_file()
+        };
+        if let Some(p) = p {
+            self.open_import(p, ctx);
+        }
+    }
+
+    fn open_import(&mut self, p: PathBuf, ctx: &egui::Context) {
+        self.info(format!("Importing {}", p.display()));
+        self.import = Some(ImportDialog::open(p, ctx));
+    }
+
+    fn export_geometry(&mut self, ext: &str) {
+        let (label, exts): (&str, &[&str]) = match ext {
+            "step" => ("STEP", &["step", "stp"]),
+            "stl" => ("STL", &["stl"]),
+            _ => ("IDF board", &["emn"]),
+        };
+        let stem = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "ferrotherm".into());
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter(label, exts)
+            .set_directory(dir_of(&self.path))
+            .set_file_name(format!("{stem}.{ext}"))
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension(ext);
+        }
+        let lib = &self.library;
+        let res: Result<Vec<PathBuf>, String> = match ext {
+            "step" => ferrotherm_io::export::case_to_step(&self.case, lib)
+                .and_then(|t| std::fs::write(&path, t).map_err(|e| e.to_string()))
+                .map(|_| vec![path.clone()]),
+            "stl" => ferrotherm_io::export::case_to_stl(&self.case, lib)
+                .and_then(|t| std::fs::write(&path, t).map_err(|e| e.to_string()))
+                .map(|_| vec![path.clone()]),
+            _ => ferrotherm_io::export::case_to_idf(&self.case, lib).and_then(|(emn, emp)| {
+                let a = path.with_extension("emn");
+                let b = path.with_extension("emp");
+                std::fs::write(&a, emn).map_err(|e| e.to_string())?;
+                std::fs::write(&b, emp).map_err(|e| e.to_string())?;
+                Ok(vec![a, b])
+            }),
+        };
+        match res {
+            Ok(files) => {
+                let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                self.info(format!("Exported {}", names.join(", ")));
+            }
+            Err(e) => self.error(format!("Export failed: {e}")),
+        }
+    }
+
     fn add_library_file(&mut self) {
         let Some(p) = rfd::FileDialog::new()
             .add_filter("FerroTherm library", &["json"])
@@ -615,6 +742,15 @@ impl FerroApp {
                         last = Instant::now();
                         send(Msg::Step { step, steps });
                     }
+                    Event::FlowIteration {
+                        iteration,
+                        max_iterations,
+                        residuals,
+                    } => send(Msg::Flow {
+                        iteration,
+                        max_iterations,
+                        residuals,
+                    }),
                     _ => {}
                 }
                 true
@@ -630,6 +766,10 @@ impl FerroApp {
                 Err(e) => send(Msg::Failed(e.to_string())),
             }
         });
+        self.live_residuals.clear();
+        if kind == JobKind::Solve && self.case.flow.as_ref().is_some_and(|f| f.enabled) {
+            self.bottom = BottomTab::Convergence;
+        }
         self.job = Some(Job {
             kind,
             rx,
@@ -683,6 +823,20 @@ impl FerroApp {
                 Msg::Step { step, steps } => {
                     job.fraction = Some(step as f32 / steps as f32);
                     job.status = format!("Time step {step} / {steps}");
+                }
+                Msg::Flow {
+                    iteration,
+                    max_iterations,
+                    residuals,
+                } => {
+                    self.live_residuals.push((iteration, residuals));
+                    if self.case.solver.mode == ferrotherm_core::case::Mode::Steady {
+                        job.fraction = Some(iteration as f32 / max_iterations.max(1) as f32);
+                    }
+                    job.status = format!(
+                        "Flow iteration {iteration} · mass {:.1e} · momentum {:.1e} · energy {:.1e}",
+                        residuals[0], residuals[1], residuals[2]
+                    );
                 }
                 Msg::Solved(s) => finished = Some(Ok(Some(s))),
                 Msg::Failed(e) => finished = Some(Err(e)),
@@ -753,6 +907,8 @@ impl FerroApp {
             min: [c[0] - h[0], c[1] - h[1], c[2] - h[2]],
             max: [c[0] + h[0], c[1] + h[1], c[2] + h[2]],
             power_w: 0.0,
+            emissivity: None,
+            finish: None,
         });
         self.hidden.push(false);
         self.sel = Sel::Block(self.case.blocks.len() - 1);
@@ -777,6 +933,7 @@ impl FerroApp {
             mount_axis: "z".into(),
             derating: Some("sd18-hermetic-normal".into()),
             tj_max_c: None,
+            network: None,
         });
         self.sel = Sel::Component(self.case.components.len() - 1);
     }
@@ -794,8 +951,91 @@ impl FerroApp {
             emissivity: None,
             finish: None,
             t_radiation_c: None,
+            heat_flux_w_m2: None,
+            solar_w_m2: None,
+            absorptivity: None,
+            velocity_m_s: None,
+            flow_m3_s: None,
+            loss: None,
         });
         self.sel = Sel::Boundary(self.case.boundaries.len() - 1);
+    }
+
+    fn domain_center(&self) -> [f64; 3] {
+        let d = &self.case.domain;
+        [0, 1, 2].map(|a| 0.5 * (d.min[a] + d.max[a]))
+    }
+
+    fn add_fan(&mut self) {
+        let c = self.domain_center();
+        let d = &self.case.domain;
+        let n = self.case.fans.len() + 1;
+        let size = (0.3 * (d.max[1] - d.min[1]).min(d.max[2] - d.min[2])).clamp(10.0, 120.0);
+        self.case.fans.push(Fan {
+            name: format!("fan_{n}"),
+            center: [d.min[0], c[1], c[2]],
+            direction: "+x".into(),
+            diameter: Some(size.round()),
+            hub_diameter: Some((0.4 * size).round()),
+            size: None,
+            // generic 40 mm-class curve: replace with the datasheet
+            curve: vec![[0.0, 30.0], [0.0025, 20.0], [0.005, 8.0], [0.0065, 0.0]],
+            flow_m3_s: None,
+        });
+        self.sel = Sel::Fan(self.case.fans.len() - 1);
+        self.ensure_flow_on();
+    }
+
+    fn add_resistance(&mut self) {
+        let c = self.domain_center();
+        let d = &self.case.domain;
+        let n = self.case.resistances.len() + 1;
+        self.case.resistances.push(Resistance {
+            name: format!("grille_{n}"),
+            center: c,
+            axis: "x".into(),
+            size: [0.5 * (d.max[1] - d.min[1]), 0.5 * (d.max[2] - d.min[2])],
+            loss: Loss {
+                zeta: 2.0,
+                free_area: Some(0.5),
+                hole_diameter_mm: Some(3.0),
+            },
+        });
+        self.sel = Sel::Resistance(self.case.resistances.len() - 1);
+        self.ensure_flow_on();
+    }
+
+    fn add_heatsink(&mut self) {
+        let c = self.domain_center();
+        let n = self.case.heatsinks.len() + 1;
+        self.case.heatsinks.push(HeatSink {
+            name: format!("heatsink_{n}"),
+            material: "al-6061-t6".into(),
+            position: [c[0] - 20.0, c[1] - 20.0, c[2]],
+            base: [40.0, 40.0, 3.0],
+            normal: "z".into(),
+            fin_axis: "x".into(),
+            fin_count: 8,
+            fin_thickness: 1.2,
+            fin_height: 15.0,
+            emissivity: None,
+        });
+        self.sel = Sel::HeatSink(self.case.heatsinks.len() - 1);
+    }
+
+    fn add_monitor(&mut self) {
+        let n = self.case.monitors.len() + 1;
+        self.case.monitors.push(Monitor {
+            name: format!("probe_{n}"),
+            position: self.domain_center(),
+        });
+        self.sel = Sel::Monitor(self.case.monitors.len() - 1);
+    }
+
+    fn ensure_flow_on(&mut self) {
+        if !self.case.flow.as_ref().is_some_and(|f| f.enabled) {
+            self.info("Fans and grilles act only with the air flow on: Model > Air flow.");
+        }
     }
 
     fn delete_selected(&mut self) {
@@ -811,6 +1051,18 @@ impl FerroApp {
             }
             Sel::Boundary(i) if i < self.case.boundaries.len() => {
                 self.case.boundaries.remove(i);
+            }
+            Sel::Fan(i) if i < self.case.fans.len() => {
+                self.case.fans.remove(i);
+            }
+            Sel::Resistance(i) if i < self.case.resistances.len() => {
+                self.case.resistances.remove(i);
+            }
+            Sel::HeatSink(i) if i < self.case.heatsinks.len() => {
+                self.case.heatsinks.remove(i);
+            }
+            Sel::Monitor(i) if i < self.case.monitors.len() => {
+                self.case.monitors.remove(i);
             }
             _ => return,
         }
@@ -836,6 +1088,30 @@ impl FerroApp {
                 let b = self.case.boundaries[i].clone();
                 self.case.boundaries.insert(i + 1, b);
                 self.sel = Sel::Boundary(i + 1);
+            }
+            Sel::Fan(i) => {
+                let mut f = self.case.fans[i].clone();
+                f.name = format!("{}_copy", f.name);
+                self.case.fans.insert(i + 1, f);
+                self.sel = Sel::Fan(i + 1);
+            }
+            Sel::Resistance(i) => {
+                let mut r = self.case.resistances[i].clone();
+                r.name = format!("{}_copy", r.name);
+                self.case.resistances.insert(i + 1, r);
+                self.sel = Sel::Resistance(i + 1);
+            }
+            Sel::HeatSink(i) => {
+                let mut h = self.case.heatsinks[i].clone();
+                h.name = format!("{}_copy", h.name);
+                self.case.heatsinks.insert(i + 1, h);
+                self.sel = Sel::HeatSink(i + 1);
+            }
+            Sel::Monitor(i) => {
+                let mut m = self.case.monitors[i].clone();
+                m.name = format!("{}_copy", m.name);
+                self.case.monitors.insert(i + 1, m);
+                self.sel = Sel::Monitor(i + 1);
             }
             _ => {}
         }
@@ -865,6 +1141,26 @@ impl FerroApp {
             Sel::Boundary(i) => {
                 if let Some(j) = mv(&mut self.case.boundaries, i, up) {
                     self.sel = Sel::Boundary(j);
+                }
+            }
+            Sel::Fan(i) => {
+                if let Some(j) = mv(&mut self.case.fans, i, up) {
+                    self.sel = Sel::Fan(j);
+                }
+            }
+            Sel::Resistance(i) => {
+                if let Some(j) = mv(&mut self.case.resistances, i, up) {
+                    self.sel = Sel::Resistance(j);
+                }
+            }
+            Sel::HeatSink(i) => {
+                if let Some(j) = mv(&mut self.case.heatsinks, i, up) {
+                    self.sel = Sel::HeatSink(j);
+                }
+            }
+            Sel::Monitor(i) => {
+                if let Some(j) = mv(&mut self.case.monitors, i, up) {
+                    self.sel = Sel::Monitor(j);
                 }
             }
             _ => {}
@@ -978,8 +1274,36 @@ impl FerroApp {
                 }
                 ui.separator();
                 if ui
+                    .button("Import CAD…")
+                    .on_hover_text("STEP, STL, IDF, KiCad, Gerber/Excellon, IPC-2581, ODB++")
+                    .clicked()
+                {
+                    self.import_file(&ctx, false);
+                }
+                if ui
+                    .button("Import CAD folder…")
+                    .on_hover_text("Gerber/Excellon set or ODB++ job folder")
+                    .clicked()
+                {
+                    self.import_file(&ctx, true);
+                }
+                ui.menu_button("Export geometry", |ui| {
+                    if ui.button("STEP (AP214 solids)…").clicked() {
+                        self.export_geometry("step");
+                    }
+                    if ui.button("STL…").clicked() {
+                        self.export_geometry("stl");
+                    }
+                    if ui.button("IDF 3.0 (.emn + .emp)…").clicked() {
+                        self.export_geometry("emn");
+                    }
+                });
+                if ui
                     .add_enabled(self.solved.is_some(), egui::Button::new("Export results…"))
-                    .on_hover_text("VTK for ParaView, report.md/json, junctions.csv")
+                    .on_hover_text(
+                        "VTK for ParaView (temperature, velocity, pressure), report.md/json, \
+                         components.csv, blocks.csv, junctions.csv",
+                    )
                     .clicked()
                 {
                     self.export_results();
@@ -1018,11 +1342,20 @@ impl FerroApp {
                 if ui.button("Add boundary").clicked() {
                     self.add_boundary();
                 }
+                if ui.button("Add fan").clicked() {
+                    self.add_fan();
+                }
+                if ui.button("Add grille / resistance").clicked() {
+                    self.add_resistance();
+                }
+                if ui.button("Add heat sink").clicked() {
+                    self.add_heatsink();
+                }
+                if ui.button("Add monitor point").clicked() {
+                    self.add_monitor();
+                }
                 ui.separator();
-                let has_item = matches!(
-                    self.sel,
-                    Sel::Block(_) | Sel::Component(_) | Sel::Boundary(_)
-                );
+                let has_item = self.sel_is_item();
                 if ui
                     .add_enabled(has_item, egui::Button::new(item("Duplicate", "Ctrl+D")))
                     .clicked()
@@ -1108,6 +1441,22 @@ impl FerroApp {
             (Sel::Grid, "Grid"),
             (Sel::Environment, "Environment"),
             (Sel::Solver, "Solver"),
+            (
+                Sel::Flow,
+                if self.case.flow.as_ref().is_some_and(|f| f.enabled) {
+                    "Air flow · on"
+                } else {
+                    "Air flow · off"
+                },
+            ),
+            (
+                Sel::Radiation,
+                if self.case.radiation.as_ref().is_some_and(|r| r.enabled) {
+                    "Radiation · on"
+                } else {
+                    "Radiation · off"
+                },
+            ),
         ] {
             if item(ui, s, t) {
                 new_sel = Some(s);
@@ -1193,6 +1542,9 @@ impl FerroApp {
                 BoundaryKind::Fixed => "fixed T",
                 BoundaryKind::Convection => "convection",
                 BoundaryKind::Radiation => "radiation",
+                BoundaryKind::Opening => "opening",
+                BoundaryKind::Inlet => "inlet",
+                BoundaryKind::Symmetry => "symmetry",
             };
             let name = if b.name.is_empty() {
                 b.face.name().to_string()
@@ -1206,13 +1558,71 @@ impl FerroApp {
                 new_sel = Some(Sel::Boundary(i));
             }
         }
+        let fan_results: Vec<(String, f64)> = self
+            .results_valid()
+            .and_then(|s| s.result.flow.as_ref())
+            .map(|f| {
+                f.fans
+                    .iter()
+                    .map(|r| (r.name.clone(), r.flow_m3_s))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if header(ui, "FANS", self.case.fans.len()) {
+            self.add_fan();
+        }
+        for (i, f) in self.case.fans.iter().enumerate() {
+            let text = match fan_results.iter().find(|r| r.0 == f.name) {
+                Some((_, q)) => format!("{}  ·  {:.1} CFM", f.name, q / flow_ui::CFM),
+                None => f.name.clone(),
+            };
+            if ui.selectable_label(sel == Sel::Fan(i), text).clicked() {
+                new_sel = Some(Sel::Fan(i));
+            }
+        }
+        if header(ui, "GRILLES", self.case.resistances.len()) {
+            self.add_resistance();
+        }
+        for (i, r) in self.case.resistances.iter().enumerate() {
+            if ui
+                .selectable_label(
+                    sel == Sel::Resistance(i),
+                    format!("{}  ·  ζ {:.2}", r.name, r.loss.zeta),
+                )
+                .clicked()
+            {
+                new_sel = Some(Sel::Resistance(i));
+            }
+        }
+        if header(ui, "HEAT SINKS", self.case.heatsinks.len()) {
+            self.add_heatsink();
+        }
+        for (i, h) in self.case.heatsinks.iter().enumerate() {
+            if ui
+                .selectable_label(
+                    sel == Sel::HeatSink(i),
+                    format!("{}  ·  {} fins", h.name, h.fin_count),
+                )
+                .clicked()
+            {
+                new_sel = Some(Sel::HeatSink(i));
+            }
+        }
+        if header(ui, "MONITORS", self.case.monitors.len()) {
+            self.add_monitor();
+        }
+        for (i, m) in self.case.monitors.iter().enumerate() {
+            if ui
+                .selectable_label(sel == Sel::Monitor(i), &m.name)
+                .clicked()
+            {
+                new_sel = Some(Sel::Monitor(i));
+            }
+        }
         if let Some(s) = new_sel {
             self.sel = s;
         }
-        if matches!(
-            self.sel,
-            Sel::Block(_) | Sel::Component(_) | Sel::Boundary(_)
-        ) {
+        if self.sel_is_item() {
             ui.add_space(10.0);
             ui.separator();
             ui.horizontal_wrapped(|ui| {
@@ -1265,6 +1675,61 @@ impl FerroApp {
             }
             Sel::Environment => inspector::environment(ui, &mut self.case.environment, lib),
             Sel::Solver => inspector::solver(ui, &mut self.case.solver),
+            Sel::Flow => {
+                flow_ui::flow_settings(ui, &mut self.case.flow, &mut self.case.domain.material, lib)
+            }
+            Sel::Radiation => flow_ui::radiation_settings(ui, &mut self.case.radiation),
+            Sel::Fan(i) => {
+                let r = valid.and_then(|s| s.result.flow.as_ref()).and_then(|f| {
+                    let name = &self.case.fans.get(i)?.name;
+                    f.fans
+                        .iter()
+                        .find(|x| &x.name == name)
+                        .map(|x| (x.flow_m3_s, x.pressure_pa))
+                });
+                if let Some(f) = self.case.fans.get_mut(i) {
+                    flow_ui::fan(ui, f, i, r);
+                }
+            }
+            Sel::Resistance(i) => {
+                if let Some(r) = self.case.resistances.get_mut(i) {
+                    flow_ui::resistance(ui, r, i);
+                }
+            }
+            Sel::HeatSink(i) => {
+                if let Some(h) = self.case.heatsinks.get_mut(i) {
+                    flow_ui::heatsink(ui, h, i, lib);
+                    if let Some(s) = valid {
+                        let prefix = format!("{}/", h.name);
+                        let parts: Vec<_> = s
+                            .report
+                            .blocks
+                            .iter()
+                            .filter(|b| b.name.starts_with(&prefix))
+                            .collect();
+                        if !parts.is_empty() {
+                            let tmax = parts.iter().map(|b| b.t_max_c).fold(f64::MIN, f64::max);
+                            let tmin = parts.iter().map(|b| b.t_min_c).fold(f64::MAX, f64::min);
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(format!("Result: {tmin:.1} … {tmax:.1} °C")).strong(),
+                            );
+                        }
+                    }
+                }
+            }
+            Sel::Monitor(i) => {
+                let r = valid.and_then(|s| s.result.flow.as_ref()).and_then(|f| {
+                    let name = &self.case.monitors.get(i)?.name;
+                    f.monitors
+                        .iter()
+                        .find(|x| &x.name == name)
+                        .map(|x| (x.t_c, x.speed_m_s))
+                });
+                if let Some(m) = self.case.monitors.get_mut(i) {
+                    flow_ui::monitor(ui, m, r);
+                }
+            }
             Sel::Block(i) => {
                 if let Some(b) = self.case.blocks.get_mut(i) {
                     inspector::block(ui, b, lib, i);
@@ -1288,6 +1753,16 @@ impl FerroApp {
                         .and_then(|s| s.report.components.get(i))
                         .filter(|r| r.name == c.name);
                     inspector::component(ui, c, lib, i, r);
+                    flow_ui::network_editor(ui, &mut c.network, i);
+                    if let Some(r) = r {
+                        if !r.surfaces.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Heat leaving each surface").strong());
+                            for (n, q) in &r.surfaces {
+                                ui.label(format!("{n}: {q:.3} W"));
+                            }
+                        }
+                    }
                 }
             }
             Sel::Boundary(i) => {
@@ -1308,9 +1783,38 @@ impl FerroApp {
         ui.horizontal_wrapped(|ui| {
             let has = self.solved.is_some();
             ui.selectable_value(&mut self.mode, ViewMode::Geometry, "Geometry");
+            let has_flow = self
+                .solved
+                .as_ref()
+                .is_some_and(|s| s.result.snapshots.last().is_some_and(|x| x.vel.is_some()));
             ui.add_enabled_ui(has, |ui| {
-                ui.selectable_value(&mut self.mode, ViewMode::Results, "Temperature")
-                    .on_disabled_hover_text("Solve first (F5)");
+                for (f, label) in [
+                    (Field::Temperature, "Temperature"),
+                    (Field::Speed, "Speed"),
+                    (Field::Pressure, "Pressure"),
+                ] {
+                    if f != Field::Temperature && !has_flow {
+                        continue;
+                    }
+                    let on = self.mode == ViewMode::Results && self.field == f;
+                    if ui
+                        .selectable_label(on, label)
+                        .on_disabled_hover_text("Solve first (F5)")
+                        .clicked()
+                    {
+                        self.mode = ViewMode::Results;
+                        if f != Field::Temperature
+                            && self.field == Field::Temperature
+                            && !self.clip.enabled
+                        {
+                            // air fields are read on a section plane
+                            self.clip.enabled = true;
+                            self.clip.axis = 1;
+                            self.reset_clip_pos();
+                        }
+                        self.field = f;
+                    }
+                }
             });
             ui.separator();
             for (p, t, tip) in [
@@ -1368,8 +1872,26 @@ impl FerroApp {
                     ui.checkbox(&mut self.show_bcs, "Boundaries");
                 }
                 ViewMode::Results => {
-                    ui.checkbox(&mut self.show_air, "Air")
-                        .on_hover_text("Include the air cells (use with Section)");
+                    if self.field == Field::Temperature {
+                        ui.checkbox(&mut self.show_air, "Air")
+                            .on_hover_text("Include the air cells (use with Section)");
+                    }
+                    let has_vel = self.solved.as_ref().is_some_and(|s| {
+                        s.result.snapshots.last().is_some_and(|x| x.vel.is_some())
+                    });
+                    if has_vel {
+                        ui.checkbox(&mut self.vectors, "Vectors").on_hover_text(
+                            "Velocity arrows on the section plane (turn on Section)",
+                        );
+                        if self.vectors {
+                            ui.add(
+                                egui::DragValue::new(&mut self.vector_density)
+                                    .range(5..=120)
+                                    .prefix("n "),
+                            )
+                            .on_hover_text("Arrows per side");
+                        }
+                    }
                     ComboBox::from_id_salt("palette")
                         .width(80.0)
                         .truncate()
@@ -1381,16 +1903,17 @@ impl FerroApp {
                         });
                     ui.checkbox(&mut self.auto_range, "Auto range");
                     if !self.auto_range {
+                        let unit = self.field_unit();
                         ui.add(
                             egui::DragValue::new(&mut self.range.0)
-                                .speed(0.2)
-                                .suffix(" °C"),
+                                .speed(0.02)
+                                .suffix(unit),
                         );
                         ui.label("…");
                         ui.add(
                             egui::DragValue::new(&mut self.range.1)
-                                .speed(0.2)
-                                .suffix(" °C"),
+                                .speed(0.02)
+                                .suffix(unit),
                         );
                     }
                     if let Some(s) = &self.solved {
@@ -1408,6 +1931,81 @@ impl FerroApp {
                 }
             }
         });
+    }
+
+    fn field_unit(&self) -> &'static str {
+        match self.field {
+            Field::Temperature => " °C",
+            Field::Speed => " m/s",
+            Field::Pressure => " Pa",
+        }
+    }
+
+    /// Velocity arrows of the cells next to the section plane.
+    fn draw_vectors(&self, ui: &Ui, rect: egui::Rect) {
+        let Some(s) = &self.solved else { return };
+        let snap = &s.result.snapshots[self.snapshot.min(s.result.snapshots.len() - 1)];
+        let Some(vel) = &snap.vel else { return };
+        let m = &s.model;
+        let g = &m.grid;
+        let n = g.n();
+        let d = &self.case.domain;
+        // plane: the section plane, or mid-y when no section is active
+        let (axis, at) = (self.clip.axis, self.clip.pos);
+        let k = (0..n[axis])
+            .min_by(|&a, &b| {
+                (g.center(axis, a) * 1e3 - at)
+                    .abs()
+                    .total_cmp(&(g.center(axis, b) * 1e3 - at).abs())
+            })
+            .unwrap_or(0);
+        let t = ferrotherm_core::model::tangential(axis);
+        let side = [d.max[t[0]] - d.min[t[0]], d.max[t[1]] - d.min[t[1]]];
+        let step = side[0].max(side[1]) / self.vector_density.max(2) as f64;
+        let vmax = vel
+            .iter()
+            .map(|u| (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt())
+            .fold(0.0f32, f32::max)
+            .max(1e-9);
+        let len_mm = 0.9 * step as f32;
+        let painter = ui.painter_at(rect);
+        let mut a = d.min[t[0]] + 0.5 * step;
+        while a < d.max[t[0]] {
+            let mut b = d.min[t[1]] + 0.5 * step;
+            while b < d.max[t[1]] {
+                let mut p = [0.0; 3];
+                p[axis] = g.center(axis, k) * 1e3;
+                p[t[0]] = a;
+                p[t[1]] = b;
+                let idx = [0, 1, 2].map(|q| locate(&g.nodes[q], p[q] * 1e-3).min(n[q] - 1));
+                let c = g.idx(idx[0], idx[1], idx[2]);
+                if m.owner[c] == Owner::Fill {
+                    let u = vel[c];
+                    let sp = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+                    if sp > 0.02 * vmax {
+                        let f = len_mm * (sp / vmax).sqrt() / sp;
+                        let p0 = p.map(|x| x as f32);
+                        let p1 = [p0[0] + u[0] * f, p0[1] + u[1] * f, p0[2] + u[2] * f];
+                        let s0 = self.vp.project(rect, p0);
+                        let s1 = self.vp.project(rect, p1);
+                        let col = self.palette.map(sp / vmax);
+                        let stroke = Stroke::new(1.3, col);
+                        painter.line_segment([s0, s1], stroke);
+                        let dir = s1 - s0;
+                        let l = dir.length();
+                        if l > 3.0 {
+                            let u2 = dir / l;
+                            let nrm = egui::vec2(-u2.y, u2.x);
+                            let h = (0.35 * l).min(6.0);
+                            painter.line_segment([s1, s1 - u2 * h + nrm * 0.5 * h], stroke);
+                            painter.line_segment([s1, s1 - u2 * h - nrm * 0.5 * h], stroke);
+                        }
+                    }
+                }
+                b += step;
+            }
+            a += step;
+        }
     }
 
     fn material_color(&self, id: &str) -> Color32 {
@@ -1467,7 +2065,138 @@ impl FerroApp {
                 &mut q,
             );
         }
+        for (i, h) in self.case.heatsinks.iter().enumerate() {
+            let Ok(blocks) = h.blocks() else { continue };
+            let base = self.material_color(&h.material);
+            let c = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
+            for b in blocks {
+                if let Some((lo, hi)) = self.clip.apply(b.min, b.max) {
+                    box_quads(f(lo), f(hi), c, Tag::HeatSink(i), &mut q);
+                }
+            }
+        }
+        for (i, (lo, hi)) in self.fan_boxes() {
+            if let Some((lo, hi)) = self.clip.apply(lo, hi) {
+                box_quads(
+                    f(lo),
+                    f(hi),
+                    Color32::from_rgba_unmultiplied(70, 110, 230, alpha.max(200)),
+                    Tag::Fan(i),
+                    &mut q,
+                );
+            }
+        }
+        for (i, (lo, hi)) in self.resistance_boxes() {
+            if let Some((lo, hi)) = self.clip.apply(lo, hi) {
+                box_quads(
+                    f(lo),
+                    f(hi),
+                    Color32::from_rgba_unmultiplied(215, 190, 90, alpha.min(150)),
+                    Tag::Resistance(i),
+                    &mut q,
+                );
+            }
+        }
+        for (i, (lo, hi)) in self.monitor_boxes() {
+            if let Some((lo, hi)) = self.clip.apply(lo, hi) {
+                box_quads(
+                    f(lo),
+                    f(hi),
+                    Color32::from_rgb(235, 70, 70),
+                    Tag::Monitor(i),
+                    &mut q,
+                );
+            }
+        }
         q
+    }
+
+    fn thin(&self) -> f64 {
+        let d = &self.case.domain;
+        let diag = (0..3)
+            .map(|a| (d.max[a] - d.min[a]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        (0.004 * diag).max(0.2)
+    }
+
+    fn fan_boxes(&self) -> Vec<(usize, BoxMm)> {
+        let t = self.thin();
+        self.case
+            .fans
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                let (a, _) = ferrotherm_core::model::direction_of(&f.direction).ok()?;
+                let ext = ferrotherm_core::model::fan_extent(f).ok()?;
+                let tg = ferrotherm_core::model::tangential(a);
+                let mut lo = f.center;
+                let mut hi = f.center;
+                lo[tg[0]] -= 0.5 * ext[0];
+                hi[tg[0]] += 0.5 * ext[0];
+                lo[tg[1]] -= 0.5 * ext[1];
+                hi[tg[1]] += 0.5 * ext[1];
+                lo[a] -= t;
+                hi[a] += t;
+                Some((i, (lo, hi)))
+            })
+            .collect()
+    }
+
+    fn resistance_boxes(&self) -> Vec<(usize, BoxMm)> {
+        let t = 0.5 * self.thin();
+        self.case
+            .resistances
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                let a = ferrotherm_core::model::axis_of(&r.axis).ok()?;
+                let tg = ferrotherm_core::model::tangential(a);
+                let mut lo = r.center;
+                let mut hi = r.center;
+                for k in 0..2 {
+                    lo[tg[k]] -= 0.5 * r.size[k];
+                    hi[tg[k]] += 0.5 * r.size[k];
+                }
+                lo[a] -= t;
+                hi[a] += t;
+                Some((i, (lo, hi)))
+            })
+            .collect()
+    }
+
+    fn monitor_boxes(&self) -> Vec<(usize, BoxMm)> {
+        let h = 1.5 * self.thin();
+        self.case
+            .monitors
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, (m.position.map(|x| x - h), m.position.map(|x| x + h))))
+            .collect()
+    }
+
+    fn sel_is_item(&self) -> bool {
+        matches!(
+            self.sel,
+            Sel::Block(_)
+                | Sel::Component(_)
+                | Sel::Boundary(_)
+                | Sel::Fan(_)
+                | Sel::Resistance(_)
+                | Sel::HeatSink(_)
+                | Sel::Monitor(_)
+        )
+    }
+
+    /// Hidden flag per model block (case blocks first, then heat-sink parts).
+    fn hidden_model_blocks(&self, m: &Model) -> Vec<bool> {
+        m.blocks
+            .iter()
+            .map(|b| match b.origin {
+                BlockOrigin::Case(j) => self.hidden.get(j).copied().unwrap_or(false),
+                BlockOrigin::HeatSink(_) => false,
+            })
+            .collect()
     }
 
     fn boundary_quads(&self) -> Vec<Quad> {
@@ -1495,6 +2224,9 @@ impl FerroApp {
                 BoundaryKind::Convection => Color32::from_rgb(40, 200, 220),
                 BoundaryKind::Radiation => Color32::from_rgb(255, 150, 40),
                 BoundaryKind::Adiabatic => Color32::from_rgb(160, 160, 160),
+                BoundaryKind::Opening => Color32::from_rgb(120, 230, 120),
+                BoundaryKind::Inlet => Color32::from_rgb(60, 160, 255),
+                BoundaryKind::Symmetry => Color32::from_rgb(200, 120, 230),
             };
             let alpha = if self.sel == Sel::Boundary(i) {
                 120
@@ -1529,6 +2261,33 @@ impl FerroApp {
                 .and_then(|c| component_box(c, &self.library).ok())
                 .map(|(lo, hi)| (f(lo), f(hi))),
             Sel::Domain => Some((f(self.case.domain.min), f(self.case.domain.max))),
+            Sel::HeatSink(i) => {
+                let blocks = self.case.heatsinks.get(i)?.blocks().ok()?;
+                let mut lo = [f64::INFINITY; 3];
+                let mut hi = [f64::NEG_INFINITY; 3];
+                for b in blocks {
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(b.min[a]);
+                        hi[a] = hi[a].max(b.max[a]);
+                    }
+                }
+                Some((f(lo), f(hi)))
+            }
+            Sel::Fan(i) => self
+                .fan_boxes()
+                .into_iter()
+                .find(|x| x.0 == i)
+                .map(|(_, (a, b))| (f(a), f(b))),
+            Sel::Resistance(i) => self
+                .resistance_boxes()
+                .into_iter()
+                .find(|x| x.0 == i)
+                .map(|(_, (a, b))| (f(a), f(b))),
+            Sel::Monitor(i) => self
+                .monitor_boxes()
+                .into_iter()
+                .find(|x| x.0 == i)
+                .map(|(_, (a, b))| (f(a), f(b))),
             _ => None,
         }
     }
@@ -1550,13 +2309,35 @@ impl FerroApp {
             ),
             hidden: self.hidden.clone(),
             show_air: self.show_air,
+            field: self.field,
         };
         if self.cache.as_ref().map(|c| c.key == key).unwrap_or(false) {
             return;
         }
-        let t = &s.result.snapshots[snapshot].t;
-        let (quads, vmin, vmax) =
-            view3d::result_quads(&s.model, t, &self.hidden, self.show_air, &self.clip);
+        let snap = &s.result.snapshots[snapshot];
+        let m = &s.model;
+        let hidden = self.hidden_model_blocks(m);
+        let field: Box<dyn Fn(usize) -> Option<f32>> = match self.field {
+            Field::Temperature => Box::new(|c| {
+                Some(match m.owner[c] {
+                    Owner::Component(ci) => snap.t[m.components[ci].node],
+                    _ => snap.t[c],
+                } as f32)
+            }),
+            Field::Speed => Box::new(|c| {
+                let v = snap.vel.as_ref()?;
+                (m.owner[c] == Owner::Fill).then(|| {
+                    let u = v[c];
+                    (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt()
+                })
+            }),
+            Field::Pressure => Box::new(|c| {
+                let p = snap.p.as_ref()?;
+                (m.owner[c] == Owner::Fill).then(|| p[c])
+            }),
+        };
+        let show_air = self.show_air || self.field != Field::Temperature;
+        let (quads, vmin, vmax) = view3d::result_quads(m, &*field, &hidden, show_air, &self.clip);
         self.next_id += 1;
         self.cache = Some(ResultCache {
             key,
@@ -1678,6 +2459,16 @@ impl FerroApp {
                     Tag::Component(i) => {
                         1_000_000 + 8 * i as u32 + q.axis as u32 * 2 + q.positive as u32
                     }
+                    Tag::HeatSink(i) => {
+                        2_000_000 + 8 * i as u32 + q.axis as u32 * 2 + q.positive as u32
+                    }
+                    Tag::Fan(i) => 3_000_000 + 8 * i as u32 + q.axis as u32 * 2 + q.positive as u32,
+                    Tag::Resistance(i) => {
+                        4_000_000 + 8 * i as u32 + q.axis as u32 * 2 + q.positive as u32
+                    }
+                    Tag::Monitor(i) => {
+                        5_000_000 + 8 * i as u32 + q.axis as u32 * 2 + q.positive as u32
+                    }
                     _ => 0,
                 };
                 let hash = view3d::hash_quads(&gq);
@@ -1723,19 +2514,28 @@ impl FerroApp {
             );
         }
         self.vp.draw_axes(ui, rect);
+        if results && self.vectors && self.clip.enabled && self.field != Field::Pressure {
+            self.draw_vectors(ui, rect);
+        }
         if results {
-            view3d::draw_colorbar(ui, rect, self.palette, range.0, range.1, "°C", text);
+            let unit = self.field_unit().trim();
+            view3d::draw_colorbar(ui, rect, self.palette, range.0, range.1, unit, text);
         }
 
         let painter = ui.painter_at(rect);
+        let fname = match self.field {
+            Field::Temperature => "Temperature",
+            Field::Speed => "Air speed",
+            Field::Pressure => "Pressure (relative to ambient)",
+        };
         let label = if results {
             if self.stale {
-                "Temperature — results out of date"
+                format!("{fname} — results out of date")
             } else {
-                "Temperature"
+                fname.to_string()
             }
         } else {
-            "Geometry"
+            "Geometry".to_string()
         };
         painter.text(
             rect.left_top() + egui::vec2(10.0, 8.0),
@@ -1811,17 +2611,31 @@ impl FerroApp {
             Tag::Block(i) => Some(Sel::Block(i)),
             Tag::Component(i) => Some(Sel::Component(i)),
             Tag::Boundary(i) => Some(Sel::Boundary(i)),
+            Tag::Fan(i) => Some(Sel::Fan(i)),
+            Tag::Resistance(i) => Some(Sel::Resistance(i)),
+            Tag::HeatSink(i) => Some(Sel::HeatSink(i)),
+            Tag::Monitor(i) => Some(Sel::Monitor(i)),
             Tag::Cell(c) => {
                 let s = self.solved.as_ref()?;
                 match s.model.owner[c] {
-                    Owner::Block(b) => {
-                        let name = &s.case.blocks.get(b)?.name;
-                        self.case
-                            .blocks
-                            .iter()
-                            .position(|x| &x.name == name)
-                            .map(Sel::Block)
-                    }
+                    Owner::Block(b) => match s.model.blocks.get(b)?.origin {
+                        BlockOrigin::Case(j) => {
+                            let name = &s.case.blocks.get(j)?.name;
+                            self.case
+                                .blocks
+                                .iter()
+                                .position(|x| &x.name == name)
+                                .map(Sel::Block)
+                        }
+                        BlockOrigin::HeatSink(j) => {
+                            let name = &s.case.heatsinks.get(j)?.name;
+                            self.case
+                                .heatsinks
+                                .iter()
+                                .position(|x| &x.name == name)
+                                .map(Sel::HeatSink)
+                        }
+                    },
                     Owner::Component(ci) => {
                         let name = &s.case.components.get(ci)?.name;
                         self.case
@@ -1854,6 +2668,22 @@ impl FerroApp {
                 let c = self.case.components.get(i)?;
                 Some(format!("{}\n{} · {:.2} W", c.name, c.package, c.power_w))
             }
+            Tag::Fan(i) => {
+                let f = self.case.fans.get(i)?;
+                Some(format!("{}\nfan blowing {}", f.name, f.direction))
+            }
+            Tag::Resistance(i) => {
+                let r = self.case.resistances.get(i)?;
+                Some(format!("{}\ngrille ζ = {:.2}", r.name, r.loss.zeta))
+            }
+            Tag::HeatSink(i) => {
+                let h = self.case.heatsinks.get(i)?;
+                Some(format!("{}\nheat sink, {} fins", h.name, h.fin_count))
+            }
+            Tag::Monitor(i) => {
+                let m = self.case.monitors.get(i)?;
+                Some(format!("{}\nmonitor point", m.name))
+            }
             Tag::Boundary(i) => {
                 let b = self.case.boundaries.get(i)?;
                 Some(format!(
@@ -1873,15 +2703,31 @@ impl FerroApp {
                 let p = g.ijk(c);
                 let pos = [0, 1, 2].map(|a| g.center(a, p[a]) * 1e3);
                 let (name, t) = match s.model.owner[c] {
-                    Owner::Block(b) => (s.case.blocks[b].name.clone(), snap.t[c]),
+                    Owner::Block(b) => (s.model.blocks[b].name.clone(), snap.t[c]),
                     Owner::Component(ci) => (
-                        format!("{} (junction)", s.case.components[ci].name),
+                        format!("{} (junction)", s.model.components[ci].name),
                         snap.t[s.model.components[ci].node],
                     ),
                     Owner::Fill => (s.case.domain.material.clone(), snap.t[c]),
                 };
+                let mut extra = String::new();
+                if s.model.owner[c] == Owner::Fill {
+                    if let Some(v) = &snap.vel {
+                        let u = v[c];
+                        extra += &format!(
+                            "\n{:.3} m/s ({:+.3}, {:+.3}, {:+.3})",
+                            (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt(),
+                            u[0],
+                            u[1],
+                            u[2]
+                        );
+                    }
+                    if let Some(p) = &snap.p {
+                        extra += &format!("\n{:+.3} Pa", p[c]);
+                    }
+                }
                 Some(format!(
-                    "{t:.2} °C\n{name}\n({:.1}, {:.1}, {:.1}) mm",
+                    "{t:.2} °C{extra}\n{name}\n({:.1}, {:.1}, {:.1}) mm",
                     pos[0], pos[1], pos[2]
                 ))
             }
@@ -1893,6 +2739,7 @@ impl FerroApp {
     fn bottom_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.bottom, BottomTab::Results, "Results");
+            ui.selectable_value(&mut self.bottom, BottomTab::Convergence, "Convergence");
             let errs = self.log.iter().filter(|l| l.level == Level::Error).count();
             let label = if errs > 0 {
                 RichText::new(format!("Messages ({errs} errors)")).color(FAIL)
@@ -1925,6 +2772,38 @@ impl FerroApp {
                         ui.label(RichText::new("No results yet: press Solve (F5).").weak());
                     }
                 },
+                BottomTab::Convergence => {
+                    let live = self.job.is_some();
+                    let hist: Vec<(usize, [f64; 3])> = if live || self.solved.is_none() {
+                        self.live_residuals.clone()
+                    } else {
+                        self.solved
+                            .as_ref()
+                            .and_then(|s| s.result.flow.as_ref())
+                            .map(|f| {
+                                f.residuals
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, r)| (i + 1, *r))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    if hist.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "Residuals appear here while a flow (CFD) case is solving.",
+                            )
+                            .weak(),
+                        );
+                    } else {
+                        let tol = self.case.flow.as_ref().map(|f| f.tolerance).unwrap_or(1e-3);
+                        results::residual_chart(ui, &hist, tol);
+                    }
+                    if let Some(f) = self.results_valid().and_then(|s| s.result.flow.as_ref()) {
+                        results::flow_tables(ui, f);
+                    }
+                }
                 BottomTab::Messages => {
                     for l in &self.log {
                         let col = match l.level {
@@ -1971,6 +2850,25 @@ impl FerroApp {
     // ------------------------------------------------------------ UI: windows
 
     fn windows(&mut self, ctx: &egui::Context) {
+        if let Some(dlg) = &mut self.import {
+            match dlg.show(ctx, &self.library, self.case.domain.min) {
+                Some(import_ui::Action::Add(fr, fit)) => {
+                    let (nb, nc) = (fr.blocks.len(), fr.components.len());
+                    let notes =
+                        ferrotherm_io::import::merge_into_case(&mut self.case, fr, fit, 10.0);
+                    let name = dlg.path.display().to_string();
+                    self.import = None;
+                    self.hidden.resize(self.case.blocks.len(), false);
+                    self.info(format!("Imported {name}: {nb} blocks, {nc} components"));
+                    for n in notes {
+                        self.warn(n);
+                    }
+                    self.vp.needs_fit = true;
+                }
+                Some(import_ui::Action::Close) => self.import = None,
+                None => {}
+            }
+        }
         if let Some(p) = self.pending.clone() {
             let mut close = false;
             egui::Modal::new(egui::Id::new("unsaved")).show(ctx, |ui| {
@@ -2013,9 +2911,10 @@ impl FerroApp {
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(
-                            "Phase 0: 3D conduction with convection/radiation boundaries, \
-                             2R compact models, MIL libraries. No fluid flow yet: internal \
-                             air conducts only (valid and conservative for sealed boxes).",
+                            "3D conjugate heat transfer: conduction, air flow (SIMPLEC, Boussinesq, \
+                             LVEL turbulence), fans, grilles, heat sinks, internal radiation, \
+                             2R and DELPHI compact models, MIL libraries; CAD import from STEP \
+                             (OpenCascade), IDF, KiCad, Gerber, IPC-2581 and ODB++.",
                         )
                         .weak(),
                     );
@@ -2033,7 +2932,9 @@ impl FerroApp {
                         ("2. Boards", "Set a block's kind to 'PCB stack-up' and give layers, copper weight and coverage: FerroTherm computes the orthotropic conductivity."),
                         ("3. Components", "Pick a package, position (min corner) and power. θJC/θJB come from the datasheet; MIL-HDBK-217F defaults exist for ceramic packages. Choose a Tj limit (SD-18 derating or custom)."),
                         ("4. Boundaries", "Faces without a boundary are adiabatic. Convection needs h; add a finish for radiation. The environment preset gives the default ambient (e.g. MIL-STD-810H 49 °C)."),
-                        ("5. Solve", "F5. Results: colour map with section plane and hover probe; tables with PASS/FAIL; export VTK for ParaView."),
+                        ("5. Air flow", "Model > Air flow turns on the CFD solver (fill the domain with 'air'). Add openings (vents) on faces, fans, grilles and heat sinks; monitor points track convergence."),
+                        ("6. CAD", "File > Import CAD reads STEP/STL (mechanics) and IDF, KiCad, Gerber+Excellon, IPC-2581, ODB++ (boards: copper map per tile, parts, power list CSV). Drag files onto the window. File > Export geometry writes STEP, STL or IDF."),
+                        ("7. Solve", "F5. Results: temperature, air speed and pressure on section planes with velocity arrows; Convergence tab; tables with PASS/FAIL; export VTK for ParaView and CSV."),
                         ("Tips", "Start with 3–4 mm cells, then refine and check that Tj stops changing. Ctrl+Z undoes any edit. Hover any value for details and sources."),
                     ] {
                         ui.label(RichText::new(h).strong());
@@ -2206,12 +3107,18 @@ impl eframe::App for FerroApp {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        if let Some(p) = dropped.into_iter().find(|p| {
-            p.extension()
+        for p in dropped {
+            let is_toml = p
+                .extension()
                 .map(|e| e.eq_ignore_ascii_case("toml"))
-                .unwrap_or(false)
-        }) {
-            self.request(Pending::OpenPath(p));
+                .unwrap_or(false);
+            if is_toml {
+                self.request(Pending::OpenPath(p));
+                break;
+            } else if import_ui::is_cad(&p) && self.import.is_none() {
+                self.open_import(p, &ctx);
+                break;
+            }
         }
 
         // window close with unsaved changes

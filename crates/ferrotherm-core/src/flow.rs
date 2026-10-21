@@ -20,7 +20,7 @@
 use crate::case::{BoundaryKind, Case, Face, FlowSettings, Mode, Scheme, Turbulence};
 use crate::error::{Error, Result};
 use crate::library::interp;
-use crate::model::{conductances, direction_of, axis_of, fan_extent, tangential, Model};
+use crate::model::{axis_of, conductances, direction_of, fan_extent, tangential, Model};
 use crate::radiation::S2s;
 use crate::simulate::{element_terms, heat_flow, surface_temps, Event, RunResult, Snapshot};
 use crate::stencil::{bicgstab, bicgstab_with, pcg_with, Pre, Stencil};
@@ -81,6 +81,13 @@ pub struct FlowResult {
     pub max_speed_m_s: f64,
     pub fluid: String,
     pub turbulence: String,
+    /// Not converged: the flow fields were averaged over this many final
+    /// iterations (the steady iteration oscillates, typically because the
+    /// flow is physically unsteady). 0 when converged.
+    pub averaged_iterations: usize,
+    /// Largest peak-to-peak variation of a key temperature (junctions,
+    /// monitors, hottest cell) over the last 50 iterations, K.
+    pub oscillation_k: f64,
 }
 
 #[inline]
@@ -115,7 +122,11 @@ fn plaw(scheme: Scheme, pe: f64) -> f64 {
 /// Coefficient of a control-volume face (diffusion D, outward mass/heat flux F).
 #[inline]
 fn anb(scheme: Scheme, d: f64, f_out: f64) -> f64 {
-    let diff = if d > 0.0 { d * plaw(scheme, f_out / d) } else { 0.0 };
+    let diff = if d > 0.0 {
+        d * plaw(scheme, f_out / d)
+    } else {
+        0.0
+    };
     diff + (-f_out).max(0.0)
 }
 
@@ -241,7 +252,17 @@ impl<'a> Solver<'a> {
             cp: mat.cp,
             beta: mat.beta.unwrap_or(0.0),
         };
-        let t_amb = m.ambient_c.unwrap_or(m.initial_c);
+        // ambient: environment preset, else the air temperature of the first
+        // opening/inlet, else the initial temperature
+        let t_amb = m
+            .ambient_c
+            .or_else(|| {
+                case.boundaries
+                    .iter()
+                    .filter(|b| matches!(b.kind, BoundaryKind::Opening | BoundaryKind::Inlet))
+                    .find_map(|b| b.t_ambient_c)
+            })
+            .unwrap_or(m.initial_c);
         let t_ref = cfg.reference_temperature_c.unwrap_or(t_amb);
         let fd = [fdims(n, 0), fdims(n, 1), fdims(n, 2)];
 
@@ -341,7 +362,10 @@ impl<'a> Solver<'a> {
             let size = fan_extent(f)?;
             let i = g.plane_index(a, f.center[a] * MM);
             if (g.nodes[a][i] - f.center[a] * MM).abs() > 1e-6 {
-                return Err(Error::Invalid(format!("fan '{}' is outside the domain", f.name)));
+                return Err(Error::Invalid(format!(
+                    "fan '{}' is outside the domain",
+                    f.name
+                )));
             }
             let t = tangential(a);
             let mut faces = Vec::new();
@@ -652,7 +676,9 @@ impl<'a> Solver<'a> {
         let mut phi = vec![0.0; nc];
         let stats = pcg_with(&mat, &b, &mut phi, 1e-8, 0.0, 5000, Pre::Mg)?;
         if !stats.converged && stats.reduction > 1e-3 {
-            return Err(Error::Invalid("wall-distance equation did not converge".into()));
+            return Err(Error::Invalid(
+                "wall-distance equation did not converge".into(),
+            ));
         }
         // L = sqrt(|∇φ|² + 2φ) − |∇φ|
         for c in 0..nc {
@@ -750,7 +776,12 @@ impl<'a> Solver<'a> {
     }
 
     /// Momentum equation for axis `a`: returns (matrix, rhs, d coefficients).
-    fn momentum(&self, st: &State, a: usize, prev_u: Option<(&[f64], f64)>) -> (Stencil, Vec<f64>, Vec<f64>) {
+    fn momentum(
+        &self,
+        st: &State,
+        a: usize,
+        prev_u: Option<(&[f64], f64)>,
+    ) -> (Stencil, Vec<f64>, Vec<f64>) {
         let g = &self.m.grid;
         let n = self.n;
         let fd = self.fd[a];
@@ -837,7 +868,8 @@ impl<'a> Solver<'a> {
                         let open = |k: Option<BoundaryKind>| {
                             matches!(k, Some(BoundaryKind::Opening | BoundaryKind::Inlet))
                         };
-                        let sym = |k: Option<BoundaryKind>| matches!(k, Some(BoundaryKind::Symmetry));
+                        let sym =
+                            |k: Option<BoundaryKind>| matches!(k, Some(BoundaryKind::Symmetry));
                         if open(kl) || open(kh) || sym(kl) || sym(kh) {
                             // no shear; momentum leaves with the outflow, inflow carries none
                             let c_n = anb(self.scheme, 0.0, f_out);
@@ -960,7 +992,11 @@ impl<'a> Solver<'a> {
                 let zeta = quad / (0.5 * rho);
                 let cdyn = if inflow { 1.0 + zeta } else { zeta.max(0.01) };
                 let mut r = lin + 0.5 * rho * cdyn * u0.abs().max(0.005);
-                let (pl, ph) = if lo_side { (0.0, st.p[c]) } else { (st.p[c], 0.0) };
+                let (pl, ph) = if lo_side {
+                    (0.0, st.p[c])
+                } else {
+                    (st.p[c], 0.0)
+                };
                 let mut num = pl - ph;
                 let fi = self.face_fan[a][f];
                 if fi >= 0 {
@@ -1012,7 +1048,8 @@ impl<'a> Solver<'a> {
                     let area = g.face_area(c, a);
                     let mut ph = p;
                     ph[a] += 1;
-                    s += rho * area * (st.u[a][fidx(self.fd[a], p)] - st.u[a][fidx(self.fd[a], ph)]);
+                    s +=
+                        rho * area * (st.u[a][fidx(self.fd[a], p)] - st.u[a][fidx(self.fd[a], ph)]);
                 }
                 s
             })
@@ -1142,11 +1179,19 @@ impl<'a> Solver<'a> {
     }
 
     /// Energy equation (all unknowns). `relax` < 1: steady under-relaxation.
+    ///
+    /// `conservative = false` drops the net-outflow term ΔF·T_P of each fluid
+    /// cell (Patankar 1980, §5.7): while the flow is not yet mass-conserving
+    /// the equation stays bounded and its residual is not polluted by
+    /// continuity errors. `true` keeps the conservative form, with the
+    /// ambient as temperature datum, for the final solve (exact global
+    /// balance) and for transients. Both coincide on a converged flow.
     fn energy(
         &self,
         st: &State,
         relax: f64,
         cap: Option<(&[f64], f64)>,
+        conservative: bool,
     ) -> (Stencil, Vec<f64>) {
         let m = self.m;
         let g = &m.grid;
@@ -1160,6 +1205,8 @@ impl<'a> Solver<'a> {
         let k = self.k_eff(st);
         let gc = conductances(g, &k);
         let bnd = m.boundary_at(&k);
+        // net mass outflow × cp of every cell, W/K
+        let mut fnet = vec![0.0; nc];
         for c in 0..nc {
             let p = g.ijk(c);
             for a in 0..3 {
@@ -1178,7 +1225,13 @@ impl<'a> Solver<'a> {
                 if gf == 0.0 && ff == 0.0 {
                     continue;
                 }
-                let dif = if gf > 0.0 { gf * plaw(self.scheme, ff / gf) } else { 0.0 };
+                let dif = if gf > 0.0 {
+                    gf * plaw(self.scheme, ff / gf)
+                } else {
+                    0.0
+                };
+                fnet[c] += ff;
+                fnet[c2] -= ff;
                 mat.pos[a][c] = dif + (-ff).max(0.0);
                 mat.ap[c] += dif + ff.max(0.0);
                 mat.neg[a][c2] = dif + ff.max(0.0);
@@ -1216,9 +1269,21 @@ impl<'a> Solver<'a> {
                 let fl = rc * uin.abs() * g.face_area(c, a);
                 if uin > 0.0 {
                     b[c] += fl * self.t_in_face(a, f);
+                    fnet[c] -= fl;
                 } else {
                     mat.ap[c] += fl;
+                    fnet[c] += fl;
                 }
+            }
+        }
+        for c in 0..nc {
+            if !self.fluid[c] || fnet[c] == 0.0 {
+                continue;
+            }
+            if conservative {
+                b[c] += fnet[c] * self.t_amb;
+            } else {
+                mat.ap[c] -= fnet[c];
             }
         }
         if let Some(r) = self.s2s {
@@ -1356,7 +1421,11 @@ pub fn spalding_nut_ratio(re: f64) -> f64 {
         let f = up * yplus(up) - re;
         let df = yplus(up) + up * dyplus(up);
         let next = up - f / df;
-        let next = if next <= 0.0 { 0.5 * up } else { next.min(up * 2.0 + 1.0) };
+        let next = if next <= 0.0 {
+            0.5 * up
+        } else {
+            next.min(up * 2.0 + 1.0)
+        };
         if (next - up).abs() < 1e-10 * up.max(1.0) {
             up = next;
             break;
@@ -1393,9 +1462,9 @@ pub fn run(
 
     // one outer SIMPLEC iteration; returns raw residuals [mass, momentum, energy]
     let iterate = |sv: &mut Solver,
-                       st: &mut State,
-                       prev: Option<(&State, f64)>,
-                       lin_it: &mut usize|
+                   st: &mut State,
+                   prev: Option<(&State, f64)>,
+                   lin_it: &mut usize|
      -> Result<[f64; 3]> {
         let prof = std::env::var_os("FERROTHERM_PROFILE").is_some();
         let t0 = std::time::Instant::now();
@@ -1436,10 +1505,11 @@ pub fn run(
             sv.cfg.relax_temperature.clamp(0.05, 1.0)
         };
         let cap = prev.map(|(p, dt)| (p.t.as_slice(), dt));
-        let (emat0, eb0) = sv.energy(st, 1.0, cap);
+        let conservative = prev.is_some();
+        let (emat0, eb0) = sv.energy(st, 1.0, cap, conservative);
         let eres = emat0.residual_l1(&st.t, &eb0);
         let (emat, eb) = if relax < 1.0 {
-            sv.energy(st, relax, cap)
+            sv.energy(st, relax, cap, conservative)
         } else {
             (emat0, eb0)
         };
@@ -1470,6 +1540,8 @@ pub fn run(
     let mut converged = false;
     let mut steady_stop = false;
     let mut iters = 0usize;
+    let mut averaged = 0usize;
+    let mut oscillation = 0.0f64;
     let junctions = |t: &[f64]| m.components.iter().map(|c| t[c.node]).collect::<Vec<f64>>();
     let storage_rate;
     match case.solver.mode {
@@ -1477,8 +1549,18 @@ pub fn run(
             if !observer(Event::Message("solving flow and heat transfer")) {
                 return Err(Error::Cancelled);
             }
-            let mut window: std::collections::VecDeque<Vec<f64>> = std::collections::VecDeque::new();
-            for it in 1..=sv.cfg.max_iterations {
+            let mut window: std::collections::VecDeque<Vec<f64>> =
+                std::collections::VecDeque::new();
+            let maxit = sv.cfg.max_iterations;
+            let navg = (maxit / 4).clamp(1, 200);
+            let mut sum_u: [Vec<f64>; 3] = [
+                vec![0.0; st.u[0].len()],
+                vec![0.0; st.u[1].len()],
+                vec![0.0; st.u[2].len()],
+            ];
+            let mut sum_nut = vec![0.0; st.nut.len()];
+            let mut nsum = 0usize;
+            for it in 1..=maxit {
                 let raw = iterate(&mut sv, &mut st, None, &mut lin_it)?;
                 let r = normalise(raw, &mut norm, it);
                 residuals.push(r);
@@ -1501,23 +1583,56 @@ pub fn run(
                 if window.len() > 50 {
                     window.pop_front();
                 }
+                oscillation = if window.len() >= 2 {
+                    let k = window[0].len();
+                    (0..k)
+                        .map(|j| {
+                            let (lo, hi) = window
+                                .iter()
+                                .fold((f64::INFINITY, f64::NEG_INFINITY), |a, w| {
+                                    (a.0.min(w[j]), a.1.max(w[j]))
+                                });
+                            hi - lo
+                        })
+                        .fold(0.0, f64::max)
+                } else {
+                    0.0
+                };
+                if it + navg > maxit {
+                    for a in 0..3 {
+                        for (s, v) in sum_u[a].iter_mut().zip(&st.u[a]) {
+                            *s += v;
+                        }
+                    }
+                    for (s, v) in sum_nut.iter_mut().zip(&st.nut) {
+                        *s += v;
+                    }
+                    nsum += 1;
+                }
                 let steady = window.len() == 50 && {
                     let k = window[0].len();
                     (0..k).all(|j| {
-                        let (lo, hi) = window.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, w| {
-                            (a.0.min(w[j]), a.1.max(w[j]))
-                        });
+                        let (lo, hi) = window
+                            .iter()
+                            .fold((f64::INFINITY, f64::NEG_INFINITY), |a, w| {
+                                (a.0.min(w[j]), a.1.max(w[j]))
+                            });
                         // 0.05 K or 0.2 % of the rise above ambient
                         hi - lo < (0.002 * (hi - sv.t_amb).abs()).max(0.05)
                     })
                 };
-                if std::env::var_os("FERROTHERM_PROFILE").is_some() && it % 25 == 0 && window.len() == 50 {
+                if std::env::var_os("FERROTHERM_PROFILE").is_some()
+                    && it % 25 == 0
+                    && window.len() == 50
+                {
                     let k = window[0].len();
                     let ranges: Vec<String> = (0..k)
                         .map(|j| {
-                            let (lo, hi) = window.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, w| {
-                                (a.0.min(w[j]), a.1.max(w[j]))
-                            });
+                            let (lo, hi) = window
+                                .iter()
+                                .fold((f64::INFINITY, f64::NEG_INFINITY), |a, w| {
+                                    (a.0.min(w[j]), a.1.max(w[j]))
+                                });
                             format!("{:.4}", hi - lo)
                         })
                         .collect();
@@ -1538,9 +1653,23 @@ pub fn run(
                     ));
                 }
             }
+            if !converged && nsum > 1 {
+                // time-average of the oscillating iteration (continuity is
+                // linear, so the average stays mass-conserving)
+                let w = 1.0 / nsum as f64;
+                for a in 0..3 {
+                    for (u, s) in st.u[a].iter_mut().zip(&sum_u[a]) {
+                        *u = s * w;
+                    }
+                }
+                for (u, s) in st.nut.iter_mut().zip(&sum_nut) {
+                    *u = s * w;
+                }
+                averaged = nsum;
+            }
             // final energy solve on the frozen flow, without relaxation
             for _ in 0..3 {
-                let (mat, b) = sv.energy(&st, 1.0, None);
+                let (mat, b) = sv.energy(&st, 1.0, None, true);
                 let s = bicgstab_with(&mat, &b, &mut st.t, 1e-10, 0.0, 2000, Pre::Mg);
                 lin_it += s.iterations;
                 st.ts = surface_temps(m, &st.t, &st.ts);
@@ -1554,11 +1683,15 @@ pub fn run(
                 Error::Invalid("transient mode needs [solver.transient] dt_s and end_s".into())
             })?;
             if !(tr.dt_s > 0.0 && tr.end_s > 0.0) {
-                return Err(Error::Invalid("transient dt_s and end_s must be > 0".into()));
+                return Err(Error::Invalid(
+                    "transient dt_s and end_s must be > 0".into(),
+                ));
             }
             let nsteps = (tr.end_s / tr.dt_s).round().max(1.0) as usize;
             let dt = tr.end_s / nsteps as f64;
-            let every = tr.output_every_s.map(|e| ((e / dt).round() as usize).max(1));
+            let every = tr
+                .output_every_s
+                .map(|e| ((e / dt).round() as usize).max(1));
             snapshots.push(sv.snapshot(&st, 0.0));
             history.push((0.0, junctions(&st.t)));
             let mut rate = 0.0;
@@ -1578,7 +1711,9 @@ pub fn run(
                     iters += 1;
                     residuals.push(r);
                     if r.iter().any(|x| !x.is_finite()) {
-                        return Err(Error::Invalid("the transient flow solution diverged: reduce dt_s".into()));
+                        return Err(Error::Invalid(
+                            "the transient flow solution diverged: reduce dt_s".into(),
+                        ));
                     }
                     if inner >= 3 && r.iter().all(|x| *x < tol) {
                         step_ok = true;
@@ -1720,6 +1855,8 @@ pub fn run(
                 Turbulence::Laminar => "laminar".into(),
                 Turbulence::Lvel => "LVEL".into(),
             },
+            averaged_iterations: averaged,
+            oscillation_k: oscillation,
         }),
     })
 }

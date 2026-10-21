@@ -1,211 +1,179 @@
 # FerroTherm
 
-**Open-source thermal solver for electronics enclosures, written in Rust.**
+**Open-source thermal and air-flow solver for electronics, written in Rust.**
 Author: **Roany Romano** · License: MIT OR Apache-2.0 · Windows, macOS, Linux
 
-FerroTherm aims to become a free alternative to commercial electronics-cooling
-tools. This is **Phase 0**: a validated 3D conduction engine with the
-libraries and checks an electronics thermal engineer needs every day. Fluid
-flow (CFD) comes in Phase 1.
+FerroTherm is a free tool in the spirit of commercial electronics-cooling
+solvers (Cadence Celsius EC Solver, Simcenter Flotherm, Icepak): a
+conjugate heat-transfer solver on a structured Cartesian grid, compact
+component models, fans, vents, grilles and heat sinks, a desktop app and
+import of the CAD data an electronics engineer actually has (STEP from
+mechanics, IDF/ODB++/IPC-2581/KiCad/Gerber from the board). It is **not** a
+clone of any commercial code and it is **not** certified: see the
+limitations below.
 
-> 🇮🇹 **In breve:** solutore termico 3D a volumi finiti per contenitori
-> elettronici. Fase 0: conduzione stazionaria e transitoria, convezione e
-> irraggiamento al contorno, modelli compatti 2R dei componenti con verifica
-> del derating Tj (NSWC Crane SD-18), libreria materiali con riferimenti alle
-> specifiche MIL/AMS/ASTM/IPC, ambienti MIL-STD-810H, modello PCB a strati.
-> Interfaccia grafica desktop (Windows/macOS/Linux) con editor del modello,
-> vista 3D, sezioni e mappe di temperatura; anche da riga di comando.
-> Risultati in ParaView (VTK) e report Markdown/JSON.
+> 🇮🇹 **In breve:** solutore termofluidodinamico 3D (Navier–Stokes
+> incomprimibile con galleggiamento di Boussinesq, turbolenza LVEL,
+> conduzione coniugata nei solidi) per apparati elettronici. Ventole con
+> curva P–Q, aperture e griglie con perdite di carico, dissipatori alettati,
+> irraggiamento interno superficie-superficie, carico solare, conducibilità
+> k(T), modelli compatti 2R e DELPHI multi-nodo con verifica del derating Tj
+> (NSWC Crane SD-18), librerie di materiali/finiture/package con riferimenti
+> MIL/AMS/ASTM/IPC, ambienti MIL-STD-810H. Importa STEP (tramite
+> OpenCascade), STL, IDF 3.0, KiCad, Gerber+Excellon, IPC-2581 e ODB++;
+> esporta STEP, STL, IDF, VTK (ParaView) e CSV. Interfaccia grafica desktop
+> per Windows/macOS/Linux e riga di comando.
 
-![FerroTherm desktop app: temperature map with section plane, PASS/FAIL table](docs/gui_results.png)
+![FerroTherm desktop app: air speed on a section plane with velocity arrows, forced-air chassis example](docs/gui_flow.png)
 
-## What it does (Phase 0)
+## Capabilities
 
-| Area | Capability |
+| Area | What is implemented |
 |---|---|
-| Physics | Steady and transient 3D heat conduction; orthotropic materials; convection and grey-body radiation boundary conditions (patchable to regions of a face); uniform volumetric sources |
-| Numerics | Finite volumes on a non-uniform Cartesian grid that conforms to every geometry plane; harmonic-mean face conductances; MIC(0)-preconditioned conjugate gradient (multithreaded); Picard iterations for radiation; implicit Euler in time |
-| Components | 2-resistor compact models (θJC / θJB) with junction node; Tj, Tcase, Tboard and heat split reported; pass/fail against derating limits |
-| PCB | Layered effective-conductivity model (copper layers, coverage, thermal vias); boards are automatically resolved with ≥ 4 cells through the thickness |
-| Libraries | 35 materials, 9 surface finishes, 18 packages, MIL-STD-810H environments, SD-18 Tj derating rules — every entry with its source; extendable with your own JSON |
-| Output | VTK RectilinearGrid (`.vtr`, `.pvd` series) for ParaView; `report.md`, `report.json`, `junctions.csv`; global energy balance |
-| Desktop app | Model tree + property editor, 3D view (orbit/pan/zoom, X-ray, section plane, hover probe, click-to-select), background solve with progress and cancel, temperature maps, PASS/FAIL tables, Tj(t) chart, undo/redo, library browser |
+| Flow (CFD) | Steady and transient incompressible Navier–Stokes, finite volumes on a staggered Cartesian grid, SIMPLEC pressure–velocity coupling, power-law or upwind convection, Boussinesq buoyancy, conjugate heat transfer (fluid = domain fill, blocks = solids) |
+| Turbulence | LVEL (wall distance from a Poisson equation + Spalding law of the wall, turbulent Prandtl 0.9) or laminar |
+| Flow devices | Fans with datasheet P–Q curve (operating point found by the solver) or fixed flow, round with hub or rectangular, in the wall or inside the box; openings (vents) at ambient pressure; fixed-flow inlets; symmetry planes; planar resistances (grilles, perforated plates, filters) with quadratic + laminar loss; parametric plate-fin heat sinks |
+| Heat transfer | Orthotropic conduction, temperature-dependent k(T), convection and grey radiation boundaries, imposed heat flux and solar load, internal surface-to-surface radiation (Monte Carlo view factors, radiosity) |
+| Components | 2-resistor (θJC/θJB) and DELPHI-style multi-node compact models (top/bottom inner/outer, sides, leads); Tj, case and board temperatures, heat split per surface; PASS/FAIL against SD-18 derating or a user limit |
+| PCB | Layered effective-conductivity stack; from ECAD data the board becomes a map of tiles, each with the copper coverage of every layer and the plated-via fraction measured from the artwork |
+| Solvers | BiCGSTAB/PCG with additive-correction multigrid; relative residuals plus a "temperatures settled" convergence check on junctions and monitor points; exact global energy balance reported |
+| CAD import | STEP AP203/214/242 (B-rep imported and tessellated by OpenCascade 8, compiled to WebAssembly, with assembly names and placements), STL, IDF 3.0, KiCad `.kicad_pcb` (v5–v9), Gerber X2/RS-274X + Excellon (+ job file), IPC-2581, ODB++ (folder or `.tgz/.zip`, `.Z` files), power list CSV |
+| Export | STEP (AP214 solids), STL, IDF 3.0 board + library, VTK (`.vtr/.pvd`: temperature, velocity, speed, pressure, material, power density), `report.md/json`, `components.csv`, `blocks.csv`, `junctions.csv` |
+| Libraries | 39 materials, finishes, 19 packages (incl. MIL-HDBK-217F θJC defaults), MIL-STD-810H environments, SD-18 derating rules — every entry with its source; extendable with your own JSON |
+| Desktop app | Model tree and property editors for every object (fans, grilles, heat sinks, monitors, DELPHI networks, flow and radiation settings), 3D view with X-ray and section planes, temperature / air-speed / pressure maps with velocity arrows, live residual plot, CAD import dialog with board preview, undo/redo |
 
 ## Desktop app
 
 ```bash
-cargo run --release -p ferrotherm-gui            # opens the example model
-cargo run --release -p ferrotherm-gui my_box.toml
+cargo run --release -p ferrotherm-gui                                   # example model
+cargo run --release -p ferrotherm-gui examples/forced_air_chassis.toml  # CFD example
 ```
 
 Release builds ship `ferrotherm-gui.exe` (Windows), `FerroTherm.app` (macOS)
 and `ferrotherm-gui` (Linux). The macOS app is ad-hoc signed, not notarised:
 the first time, right-click it and choose *Open*.
 
-- **Left:** model tree. `+` adds blocks, components and boundaries; the
-  checkbox hides a block in the 3D view. Later items overwrite earlier ones
-  where they overlap.
-- **Right:** properties of the selected item. Hover any material, package or
-  limit for its values and source.
-- **Centre:** 3D view. Drag to rotate, right-drag (or Shift+drag) to pan,
-  wheel to zoom, double-click to fit, click to select. *Section* cuts the
-  model along x, y or z; *X-ray* shows the inside; *Boundaries* shows where
-  each boundary condition applies.
-- **Solve (F5)** runs in the background (progress bar, *Cancel*). The view
-  switches to the temperature map; hover for the local temperature. The
-  bottom panel lists Tj with PASS/FAIL, block temperatures and the heat
-  leaving through each boundary. *Export results…* writes the VTK files and
-  reports.
-- Shortcuts: Ctrl/Cmd+N, O, S, Shift+S, Z (undo), Y (redo), D (duplicate),
-  Del (delete), Esc (deselect).
+- **Left:** model tree — project, domain, grid, environment, solver, *Air
+  flow*, *Radiation*, then blocks, components, boundaries, fans, grilles,
+  heat sinks and monitor points (`+` adds one).
+- **Right:** properties of the selected item; hover materials, packages and
+  limits for their values and sources.
+- **Centre:** 3D view (drag rotate, right-drag pan, wheel zoom, double-click
+  fit, click select). After a solve: *Temperature*, *Speed*, *Pressure*,
+  *Section*, *Vectors*; hover for local values.
+- **Bottom:** results tables (PASS/FAIL), *Convergence* (live residuals,
+  fans, openings, monitors) and messages.
+- **File > Import CAD…** (or drag a file onto the window): STEP/STL become
+  blocks (bounding box or voxelised shape); board formats become PCB tiles +
+  parts, with a power list CSV (`refdes, power_W [, θJC, θJB, Tj_max]`).
+  The first STEP import prepares the OpenCascade kernel (≈30 s once, then
+  cached in the user cache folder).
+- **File > Export geometry** (STEP, STL, IDF) and **Export results**.
 
-The app saves plain case files (`.toml`), identical to the ones the CLI
-reads; comments in a hand-written file are not preserved when saved from the
-app. The 3D view is drawn by a small depth-buffered software rasteriser, so
-it does not depend on the graphics driver; set `FERROTHERM_RENDERER=glow` to
-force the OpenGL window backend if the default one fails to start.
+![Import of a KiCad board: copper per layer, part footprints, options](docs/gui_import.png)
 
-![Geometry view with X-ray and the PCB stack-up editor](docs/gui_geometry.png)
+![A KiCad STEP assembly imported through OpenCascade and voxelised](docs/gui_step.png)
 
 ## Command line
 
 ```bash
-# build (needs the Rust toolchain: https://rustup.rs)
-cargo build --release
+cargo build --release                       # needs Rust ≥ 1.95 (https://rustup.rs)
+F=./target/release/ferrotherm
 
-# list what is in the libraries
-./target/release/ferrotherm materials
-./target/release/ferrotherm materials --category metal
-./target/release/ferrotherm packages
-./target/release/ferrotherm finishes
-./target/release/ferrotherm environments
-./target/release/ferrotherm deratings
-
-# effective conductivity of an 8-layer board
-./target/release/ferrotherm pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
-
-# create, check and solve the example case
-./target/release/ferrotherm init my_box.toml
-./target/release/ferrotherm check my_box.toml
-./target/release/ferrotherm run my_box.toml
+$F run examples/forced_air_chassis.toml     # CFD example
+$F cad-info board.kicad_pcb                 # what a CAD file contains
+$F import board.kicad_pcb -o box.toml --power power.csv --tile 10
+$F import chassis.step --into box.toml --shape voxel:1 --material al-6061-t6
+$F import gerbers.zip --into box.toml --origin 10,10,5
+$F export box.toml box.step                 # also .stl, .emn (IDF)
+$F check box.toml
+$F run box.toml -o results
+$F materials | packages | finishes | environments | deratings
+$F pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
 ```
 
-On Windows the binary is `target\release\ferrotherm.exe`. Open the `.vtr`
-(steady) or `.pvd` (transient) file in [ParaView](https://www.paraview.org).
-`ferrotherm run` exits with code **2** when a component exceeds its Tj limit,
-so it can gate a CI pipeline.
+`ferrotherm run` exits with code **2** when a component exceeds its Tj
+limit, so it can gate a CI pipeline. Open the `.vtr` (steady) or `.pvd`
+(transient) file in [ParaView](https://www.paraview.org).
 
 ## Case file
 
-Plain TOML; units are mm, °C, W, W/(m² K), s. See
-[`docs/case-format.md`](docs/case-format.md) and
-[`examples/mil_enclosure.toml`](examples/mil_enclosure.toml).
-
-```toml
-[domain]
-min = [0, 0, 0]
-max = [200, 150, 60]
-material = "air-still"
-
-[environment]
-preset = "mil-std-810h-a1-hot-dry"   # 49 °C operational ambient
-use = "ambient_max"
-
-[[blocks]]
-name = "pcb"
-min = [8, 8, 10]
-max = [192, 142, 11.6]
-pcb = { thickness_mm = 1.6, layers = 8, copper_oz = 1.0, coverage = 0.6 }
-
-[[components]]
-name = "U2_CQFP"
-package = "cqfp-132"
-position = [110, 40, 11.6]
-power_w = 2.0
-r_jc = 10.0
-derating = "sd18-hermetic-normal"
-
-[[boundaries]]
-face = "zmax"
-type = "convection"
-h = 6.0
-finish = "al-anodize-black"
-```
+Plain TOML; units mm, °C, W, W/(m² K), s, m³/s, Pa. Reference:
+[`docs/case-format.md`](docs/case-format.md). Examples:
+[`examples/mil_enclosure.toml`](examples/mil_enclosure.toml) (sealed MIL box,
+conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis.toml)
+(fan, vent, grille, heat sink, CFD).
 
 ## Verification
 
-`cargo test --release` runs the analytical verification suite
-(`crates/ferrotherm-core/tests/validation.rs`):
+`cargo test --release` runs the verification suites:
 
 | Test | Reference | Result |
 |---|---|---|
-| Two-layer wall, fixed T + convection | Exact series-resistance solution | error < 1e-6 K (scheme is exact) |
-| Slab with uniform generation | T = T0 + q'''x(L−x)/2k | observed order of accuracy 2.00 |
-| Transient plane wall, Fo = 0.2 | Fourier series solution | max error 0.13 K on a 100 K step |
-| Black-body radiating cube | P = εσA(T⁴ − Tr⁴) | error 0.6 mK |
-| 2R compact component | Tj − Tcase = Q·Rjc | exact; power fully accounted |
-| Cold-plate patch | Heat balance + 1D estimate | all heat through the patch |
-
-Every run reports the global energy balance (power in vs heat out and
-storage). Grid study on the example case (342k → 2.1M cells): junction
-temperatures change by less than 0.4 K between 2 mm and 1 mm cells.
+| Two-layer wall, slab with generation, transient wall, radiating cube, 2R part, cold plate | Analytical | errors ≤ 1e-6 K … 0.13 K, 2nd-order convergence |
+| Laminar channel (Poiseuille) | Exact dp/dx and centre velocity | −0.5 % and −0.2 % |
+| Differentially heated cavity, Ra = 1e4 / 1e5 | De Vahl Davis (1983) benchmark Nu = 2.243 / 4.519 | 2.259 / 4.559 (+0.7 % / +0.9 %) |
+| Fan in a duct with a resistance | Analytic operating point | Q identical to 4 digits |
+| Forced convection channel | Energy balance | exact |
+| Parallel plates, internal radiation | Analytical radiosity | 7.667 W vs 7.672 W |
+| Slab with k(T), plate with solar flux | Analytical | exact |
+| DELPHI network reduced to 2R | 2R model | Tj within 0.03 K |
+| Real KiCad board vs its own Gerber export | Same board, two readers | copper coverage within 0.04 %; cross-checked with gerbv |
+| Real KiCad STEP assembly (55 parts) | Pick-and-place file | 54/54 placed parts at their position |
+| FerroTherm STEP/IDF/STL export | Re-import (OpenCascade for STEP) | boxes recovered within 1e-4 mm |
+| KiCad board → case → solve | Power in = heat out | imbalance < 1e-6 % |
 
 ## Limitations (read before use)
 
-- **No fluid flow yet.** Internal air only conducts. For sealed boxes this is
-  conservative; for fan-cooled or vented equipment the results are not valid.
-  External convection is a user-supplied h.
-- **Radiation** is surface-to-ambient only; no internal surface-to-surface
-  exchange and no solar load.
-- **PCB** is an effective (smeared) orthotropic block: individual traces,
-  planes and local via arrays under a component are not resolved. Model a
-  local copper pour or via field as its own block if it matters.
-- **Compact models** are 2R. They are boundary-condition dependent by
-  construction; use DELPHI/detailed models for critical parts (Phase 2).
-- Library values are **typical handbook values**. Commercial-part θ values
-  are deliberately *not* defaulted: they must come from the datasheet.
-  MIL-HDBK-217F θJC defaults are provided for ceramic packages because the
-  handbook defines them for exactly that use.
-- Constant properties (no k(T)).
-
-## Roadmap
-
-1. **Phase 1** — incompressible Navier–Stokes + Boussinesq, conjugate heat
-   transfer, validated on De Vahl Davis cavity and heated-block channel cases.
-2. **Phase 2** — LVEL turbulence, fans (P–Q curves), porous grilles/filters,
-   DELPHI compact models, k(T).
-3. **Phase 3** — surface-to-surface radiation, GPU kernels (wgpu), ECAD
-   import (ODB++/IPC-2581/IDF), STEP import, GUI.
+- **Not equivalent to a commercial solver.** The numerical method follows
+  the same family (structured Cartesian finite volumes, SIMPLE-type coupling,
+  LVEL, compact models), but the code is young and validated only on the
+  benchmarks above. Compare with measurements or another tool before using
+  results for qualification.
+- **Turbulence:** LVEL or laminar only (no k-ε / k-ω yet). Strongly separated
+  or unsteady flows may not reach a steady residual; the solver then stops at
+  `max_iterations` and reports *NOT converged* — look at the Convergence tab
+  and the monitor points, or run transient.
+- **Geometry is axis-aligned boxes** (staircase). STEP bodies are imported
+  as bounding boxes or voxels; inclined or curved surfaces are approximated.
+- **CPU only** (multithreaded); no GPU solver yet.
+- **IPC-2581 and ODB++** readers are tested on files structured like KiCad's
+  exporters and on synthetic samples, not yet on Cadence Allegro / Mentor
+  Xpedition / Altium production exports. Please report files that fail.
+- **IDF** is imported with board outline, placements and part outlines/heights
+  (no copper): combine with Gerber/ODB++ for the copper map.
+- Missing part heights are guessed from the package name and listed as a
+  warning; library values are typical handbook data; commercial-part θ
+  values must come from the datasheet.
 
 ## Library sources
 
-Each library entry carries a `source` field and, where relevant, the
-procurement specification (`specs`). Main references:
-
-- Material properties: ASM Handbook Vol. 2, MatWeb, Ioffe Institute NSM
-  database (semiconductors), Incropera (air), supplier typical values.
-- θJC defaults: MIL-HDBK-217F Notice 2, section 5.11.
-- Tj derating: NAVSEA NSWC Crane SD-18, Microcircuits Derating.
-- Climatic design types: MIL-STD-810H, Method 501.7, Table 501.7-I.
-
-Check the current revision of each standard before using results for
-qualification. Contributions with better-sourced data are very welcome.
+Each library entry carries a `source` and, where relevant, the procurement
+specification. Main references: ASM Handbook Vol. 2, MatWeb, Ioffe NSM
+(semiconductors), Incropera (air, water); MIL-HDBK-217F Notice 2 §5.11 (θJC
+defaults); NAVSEA NSWC Crane SD-18 (Tj derating); MIL-STD-810H Method 501.7
+(climatic categories); Idelchik, *Flow Resistance*, via Electronics Cooling
+(May 1998) for the laminar perforated-plate loss. Check the current revision
+of each standard before using results for qualification.
 
 ## Project layout
 
 ```
-crates/ferrotherm-core   numerical engine + libraries (data/*.json)
+crates/ferrotherm-core   numerical engine (conduction, CFD, radiation) + libraries
+crates/ferrotherm-io     CAD import/export (STEP via OpenCascade-WASM, STL, IDF,
+                         KiCad, Gerber/Excellon, IPC-2581, ODB++)
 crates/ferrotherm-cli    `ferrotherm` command-line tool
 crates/ferrotherm-gui    `ferrotherm-gui` desktop app (egui/eframe)
 examples/                example cases
 docs/                    case-file reference
-.github/workflows        CI on Windows/macOS/Linux, release binaries on tags
 ```
+
+Third-party: OpenCascade Technology (LGPL-2.1 with exception) is used
+through the `occt-wasm` crate as a WebAssembly module run by wasmtime; it can
+be left out with `--no-default-features` on `ferrotherm-io` (STEP then falls
+back to the built-in reader, which gives vertex bounding boxes only).
 
 ## License
 
 Copyright © 2026 Roany Romano. Licensed under either of
 [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option.
-Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in this work shall be dual licensed as above,
-without any additional terms or conditions.

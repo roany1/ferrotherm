@@ -119,14 +119,18 @@ impl S2s {
                             continue;
                         }
                         match m.owner[nb] {
-                            Owner::Component(ci) => (PatchKind::Reradiating, -(10 + ci as i64), None, 0.0),
+                            Owner::Component(ci) => {
+                                (PatchKind::Reradiating, -(10 + ci as i64), None, 0.0)
+                            }
                             Owner::Block(b) => (
                                 PatchKind::Surface,
                                 b as i64,
                                 Some(nb),
                                 m.blocks[b].emissivity.unwrap_or(cfg.default_emissivity),
                             ),
-                            Owner::Fill => (PatchKind::Surface, -1, Some(nb), cfg.default_emissivity),
+                            Owner::Fill => {
+                                (PatchKind::Surface, -1, Some(nb), cfg.default_emissivity)
+                            }
                         }
                     };
                     let key = (owner_tag, dir, tile_of(0), tile_of(1));
@@ -179,7 +183,11 @@ impl S2s {
                     let t = crate::model::tangential(a);
                     // start on the face, ray points into the gas cell (away from the face)
                     let mut o = [0.0f64; 3];
-                    o[a] = if hi { g.nodes[a][p[a] + 1] } else { g.nodes[a][p[a]] };
+                    o[a] = if hi {
+                        g.nodes[a][p[a] + 1]
+                    } else {
+                        g.nodes[a][p[a]]
+                    };
                     for q in 0..2 {
                         let lo = g.nodes[t[q]][p[t[q]]];
                         let hi2 = g.nodes[t[q]][p[t[q]] + 1];
@@ -191,7 +199,11 @@ impl S2s {
                     let phi = 2.0 * std::f64::consts::PI * r1;
                     let sr = r2.sqrt();
                     let mut d = [0.0f64; 3];
-                    d[a] = if hi { -(1.0 - r2).sqrt() } else { (1.0 - r2).sqrt() };
+                    d[a] = if hi {
+                        -(1.0 - r2).sqrt()
+                    } else {
+                        (1.0 - r2).sqrt()
+                    };
                     d[t[0]] = sr * phi.cos();
                     d[t[1]] = sr * phi.sin();
                     if let Some(hit) = trace(m, c, o, d, &face_patch) {
@@ -272,7 +284,10 @@ impl S2s {
             let mut change = 0.0f64;
             let mut scale = 0.0f64;
             for i in 0..np {
-                let gi: f64 = self.f[i].iter().map(|(k, f)| *f as f64 * j[*k as usize]).sum();
+                let gi: f64 = self.f[i]
+                    .iter()
+                    .map(|(k, f)| *f as f64 * j[*k as usize])
+                    .sum();
                 gv[i] = gi;
                 let p = &self.patches[i];
                 let new = match p.kind {
@@ -289,7 +304,10 @@ impl S2s {
             }
         }
         for i in 0..np {
-            gv[i] = self.f[i].iter().map(|(k, f)| *f as f64 * j[*k as usize]).sum();
+            gv[i] = self.f[i]
+                .iter()
+                .map(|(k, f)| *f as f64 * j[*k as usize])
+                .sum();
         }
         *self.j.lock().unwrap() = j.clone();
         (j, gv)
@@ -326,7 +344,10 @@ impl S2s {
     }
 
     pub fn surface_patches(&self) -> usize {
-        self.patches.iter().filter(|p| p.kind == PatchKind::Surface).count()
+        self.patches
+            .iter()
+            .filter(|p| p.kind == PatchKind::Surface)
+            .count()
     }
 }
 
@@ -369,7 +390,11 @@ fn trace(
         }
         let hi = d[amin] > 0.0;
         let dir = (amin * 2 + hi as usize) as u8;
-        let edge = if hi { p[amin] + 1 == n[amin] } else { p[amin] == 0 };
+        let edge = if hi {
+            p[amin] + 1 == n[amin]
+        } else {
+            p[amin] == 0
+        };
         if edge {
             return face_patch.get(&(c, dir)).copied();
         }

@@ -55,6 +55,10 @@ pub enum Tag {
     Component(usize),
     Boundary(usize),
     Cell(usize),
+    Fan(usize),
+    Resistance(usize),
+    HeatSink(usize),
+    Monitor(usize),
 }
 
 /// One axis-aligned face. `value` is a temperature (results) or NaN.
@@ -206,29 +210,38 @@ impl Clip {
     }
 }
 
-/// Exterior faces of the solid cells of a solved model, coloured later from
-/// `value`. Component bodies take their junction temperature.
+/// Exterior faces of the shown cells of a solved model, coloured later from
+/// `value`. `field(c)` gives the value of cell `c`, or `None` to leave the
+/// cell out (e.g. solids when showing air speed).
 pub fn result_quads(
     m: &Model,
-    t: &[f64],
+    field: &dyn Fn(usize) -> Option<f32>,
     hidden_blocks: &[bool],
     show_air: bool,
     clip: &Clip,
 ) -> (Vec<Quad>, f32, f32) {
     let g = &m.grid;
     let n = g.n();
-    let solid = |c: usize| -> bool {
-        let keep = match m.owner[c] {
-            Owner::Fill => show_air,
-            Owner::Block(b) => !hidden_blocks.get(b).copied().unwrap_or(false),
-            Owner::Component(_) => true,
-        };
-        if !keep || !clip.enabled {
-            return keep;
-        }
-        let p = g.ijk(c);
-        clip.keeps(g.center(clip.axis, p[clip.axis]) * 1e3)
-    };
+    let values: Vec<Option<f32>> = (0..m.ncells)
+        .map(|c| {
+            let keep = match m.owner[c] {
+                Owner::Fill => show_air,
+                Owner::Block(b) => !hidden_blocks.get(b).copied().unwrap_or(false),
+                Owner::Component(_) => true,
+            };
+            if !keep {
+                return None;
+            }
+            if clip.enabled {
+                let p = g.ijk(c);
+                if !clip.keeps(g.center(clip.axis, p[clip.axis]) * 1e3) {
+                    return None;
+                }
+            }
+            field(c).filter(|v| v.is_finite())
+        })
+        .collect();
+    let solid = |c: usize| values[c].is_some();
     let stride = [1usize, n[0], n[0] * n[1]];
     let mut out = Vec::new();
     let (mut vmin, mut vmax) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -237,10 +250,7 @@ pub fn result_quads(
             continue;
         }
         let p = g.ijk(c);
-        let value = match m.owner[c] {
-            Owner::Component(ci) => t[m.components[ci].node],
-            _ => t[c],
-        } as f32;
+        let value = values[c].unwrap_or(0.0);
         let lo = [0, 1, 2].map(|a| (g.nodes[a][p[a]] * 1e3) as f32);
         let hi = [0, 1, 2].map(|a| (g.nodes[a][p[a] + 1] * 1e3) as f32);
         for axis in 0..3 {

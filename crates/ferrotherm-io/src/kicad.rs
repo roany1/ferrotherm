@@ -111,13 +111,18 @@ fn xy(n: &Sx) -> Option<P2> {
 }
 
 fn layer_of(n: &Sx) -> Option<String> {
-    n.child("layer").and_then(|l| l.str_arg(1)).map(|s| s.to_string())
+    n.child("layer")
+        .and_then(|l| l.str_arg(1))
+        .map(|s| s.to_string())
 }
 
 /// Layers a pad/zone covers ("*.Cu", "F&B.Cu" patterns expanded later).
 fn layers_of(n: &Sx) -> Vec<String> {
     match n.child("layers") {
-        Some(l) => l.items()[1..].iter().filter_map(|a| a.atom().map(|s| s.to_string())).collect(),
+        Some(l) => l.items()[1..]
+            .iter()
+            .filter_map(|a| a.atom().map(|s| s.to_string()))
+            .collect(),
         None => layer_of(n).into_iter().collect(),
     }
 }
@@ -206,7 +211,10 @@ pub fn read(text: &str) -> Result<Board, String> {
         } else if n == "B.Cu" {
             10_000
         } else {
-            n.trim_start_matches("In").trim_end_matches(".Cu").parse::<i32>().unwrap_or(5000)
+            n.trim_start_matches("In")
+                .trim_end_matches(".Cu")
+                .parse::<i32>()
+                .unwrap_or(5000)
         }
     });
     // stack-up thicknesses
@@ -224,7 +232,13 @@ pub fn read(text: &str) -> Result<Board, String> {
                 }
                 last_cu = cu_names.iter().position(|n| n == name).unwrap_or(last_cu);
             } else if typ == "core" || typ == "prepreg" {
-                dielectrics.push((last_cu, t.unwrap_or(0.0), l.child("material").and_then(|m| m.str_arg(1)).map(|s| s.to_string())));
+                dielectrics.push((
+                    last_cu,
+                    t.unwrap_or(0.0),
+                    l.child("material")
+                        .and_then(|m| m.str_arg(1))
+                        .map(|s| s.to_string()),
+                ));
             }
         }
     }
@@ -240,11 +254,17 @@ pub fn read(text: &str) -> Result<Board, String> {
         }
     }
     // footprint edge cuts too
-    for fp in root.items().iter().filter(|c| matches!(c.head(), Some("footprint") | Some("module"))) {
+    for fp in root
+        .items()
+        .iter()
+        .filter(|c| matches!(c.head(), Some("footprint") | Some("module")))
+    {
         let at = fp.child("at").and_then(xy).unwrap_or([0.0, 0.0]);
         let rot = fp.child("at").and_then(|a| a.num(3)).unwrap_or(0.0);
         for g in fp.items() {
-            if g.head().map(|h| h.starts_with("fp_")).unwrap_or(false) && layer_of(g).as_deref() == Some("Edge.Cuts") {
+            if g.head().map(|h| h.starts_with("fp_")).unwrap_or(false)
+                && layer_of(g).as_deref() == Some("Edge.Cuts")
+            {
                 if let Some(p) = graphic_points(g) {
                     lines.push(p.into_iter().map(|q| local_to_board(q, at, rot)).collect());
                 }
@@ -253,7 +273,9 @@ pub fn read(text: &str) -> Result<Board, String> {
     }
     board.outline = crate::gerber::chain_segments(&lines, 0.01);
     if board.outline.is_empty() && !lines.is_empty() {
-        board.warnings.push("Edge.Cuts does not form a closed contour; using its extent".into());
+        board
+            .warnings
+            .push("Edge.Cuts does not form a closed contour; using its extent".into());
         let pts: Vec<P2> = lines.iter().flatten().copied().collect();
         if let Some((lo, hi)) = bbox(&pts) {
             board.outline = vec![vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]];
@@ -270,7 +292,11 @@ pub fn read(text: &str) -> Result<Board, String> {
         poly: Option<Vec<P2>>,
     }
     let mut pads: Vec<PadDraw> = Vec::new();
-    for fp in root.items().iter().filter(|c| matches!(c.head(), Some("footprint") | Some("module"))) {
+    for fp in root
+        .items()
+        .iter()
+        .filter(|c| matches!(c.head(), Some("footprint") | Some("module")))
+    {
         let name = fp.str_arg(1).unwrap_or("").to_string();
         let at = fp.child("at").and_then(xy).unwrap_or([0.0, 0.0]);
         // KiCad rotation is CCW in its y-down view = CCW on screen; with y flipped it stays CCW
@@ -326,12 +352,15 @@ pub fn read(text: &str) -> Result<Board, String> {
             pad_pts.push([pc[0] + 0.5 * size[0], pc[1] + 0.5 * size[1]]);
             // KiCad 6+: pad angle is absolute (includes the footprint rotation)
             let poly = if shape == "custom" {
-                pad.child("primitives").and_then(|pr| pr.child("gr_poly")).and_then(graphic_points)
+                pad.child("primitives")
+                    .and_then(|pr| pr.child("gr_poly"))
+                    .and_then(graphic_points)
             } else {
                 None
             };
             let c = local_to_board(pc, at, rot);
-            let prot = if root.child("version").and_then(|v| v.num(1)).unwrap_or(0.0) >= 20210000.0 {
+            let prot = if root.child("version").and_then(|v| v.num(1)).unwrap_or(0.0) >= 20210000.0
+            {
                 prot_abs
             } else {
                 prot_abs + rot
@@ -343,17 +372,29 @@ pub fn read(text: &str) -> Result<Board, String> {
                     c,
                     size,
                     rot: prot,
-                    poly: poly.clone().map(|p| p.into_iter().map(|q| local_to_board(q, at, rot)).collect()),
+                    poly: poly
+                        .clone()
+                        .map(|p| p.into_iter().map(|q| local_to_board(q, at, rot)).collect()),
                 });
             }
             // plated through holes act as vias thermally
             if pad.str_arg(2) == Some("thru_hole") {
                 if let Some(d) = pad.child("drill").and_then(|d| d.num(1)) {
-                    board.drills.push(Drill { x: c[0], y: c[1], d_mm: d, plated: true });
+                    board.drills.push(Drill {
+                        x: c[0],
+                        y: c[1],
+                        d_mm: d,
+                        plated: true,
+                    });
                 }
             } else if pad.str_arg(2) == Some("np_thru_hole") {
                 if let Some(d) = pad.child("drill").and_then(|d| d.num(1)) {
-                    board.drills.push(Drill { x: c[0], y: c[1], d_mm: d, plated: false });
+                    board.drills.push(Drill {
+                        x: c[0],
+                        y: c[1],
+                        d_mm: d,
+                        plated: false,
+                    });
                 }
             }
         }
@@ -390,7 +431,12 @@ pub fn read(text: &str) -> Result<Board, String> {
     for item in root.items() {
         match item.head() {
             Some("segment") => {
-                let (Some(a), Some(b)) = (item.child("start").and_then(xy), item.child("end").and_then(xy)) else { continue };
+                let (Some(a), Some(b)) = (
+                    item.child("start").and_then(xy),
+                    item.child("end").and_then(xy),
+                ) else {
+                    continue;
+                };
                 let w = item.child("width").and_then(|w| w.num(1)).unwrap_or(0.25);
                 if let Some(r) = layer_of(item).and_then(|l| rasters.get_mut(&l)) {
                     r.segment(a, b, w, true);
@@ -407,7 +453,9 @@ pub fn read(text: &str) -> Result<Board, String> {
                 }
             }
             Some("via") => {
-                let Some(c) = item.child("at").and_then(xy) else { continue };
+                let Some(c) = item.child("at").and_then(xy) else {
+                    continue;
+                };
                 let size = item.child("size").and_then(|s| s.num(1)).unwrap_or(0.6);
                 let drill = item.child("drill").and_then(|s| s.num(1)).unwrap_or(0.3);
                 for l in layers_of(item) {
@@ -420,7 +468,10 @@ pub fn read(text: &str) -> Result<Board, String> {
                 let (i0, i1) = match (ls.first(), ls.last()) {
                     (Some(a), Some(b)) => (
                         cu_names.iter().position(|n| n == a).unwrap_or(0),
-                        cu_names.iter().position(|n| n == b).unwrap_or(cu_names.len().saturating_sub(1)),
+                        cu_names
+                            .iter()
+                            .position(|n| n == b)
+                            .unwrap_or(cu_names.len().saturating_sub(1)),
                     ),
                     _ => (0, cu_names.len().saturating_sub(1)),
                 };
@@ -429,7 +480,12 @@ pub fn read(text: &str) -> Result<Board, String> {
                         r.disc(c, 0.5 * size, true);
                     }
                 }
-                board.drills.push(Drill { x: c[0], y: c[1], d_mm: drill, plated: true });
+                board.drills.push(Drill {
+                    x: c[0],
+                    y: c[1],
+                    d_mm: drill,
+                    plated: true,
+                });
             }
             Some("zone") => {
                 for fp in item.children("filled_polygon") {
@@ -446,7 +502,9 @@ pub fn read(text: &str) -> Result<Board, String> {
     }
     for p in &pads {
         for l in expand(&p.layer) {
-            let Some(r) = rasters.get_mut(&l) else { continue };
+            let Some(r) = rasters.get_mut(&l) else {
+                continue;
+            };
             match p.shape.as_str() {
                 "circle" => r.disc(p.c, 0.5 * p.size[0], true),
                 "oval" => r.obround(p.c, p.size[0], p.size[1], p.rot, true),

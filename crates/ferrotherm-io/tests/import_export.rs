@@ -22,14 +22,25 @@ fn idf_export_reimports() {
     let (emn, emp) = export::case_to_idf(&case, &lib).unwrap();
     let mut b = ferrotherm_io::idf::read(&emn, Some(&emp)).unwrap();
     let s = b.summary();
-    eprintln!("IDF: {} parts, board {:?} t {}", s.components, s.size_mm, s.thickness_mm);
+    eprintln!(
+        "IDF: {} parts, board {:?} t {}",
+        s.components, s.size_mm, s.thickness_mm
+    );
     assert!(s.components >= case.components.len());
     for c in &case.components {
         let (lo, hi) = ferrotherm_core::model::component_box(c, &lib).unwrap();
-        let p = b.components.iter().find(|p| p.refdes == c.name).unwrap_or_else(|| panic!("{} missing", c.name));
+        let p = b
+            .components
+            .iter()
+            .find(|p| p.refdes == c.name)
+            .unwrap_or_else(|| panic!("{} missing", c.name));
         let (flo, fhi) = p.footprint().unwrap();
         for a in 0..2 {
-            assert!((flo[a] - lo[a]).abs() < 1e-3 && (fhi[a] - hi[a]).abs() < 1e-3, "{}", c.name);
+            assert!(
+                (flo[a] - lo[a]).abs() < 1e-3 && (fhi[a] - hi[a]).abs() < 1e-3,
+                "{}",
+                c.name
+            );
         }
         assert!((p.height_mm.unwrap() - (hi[2] - lo[2])).abs() < 1e-3);
     }
@@ -60,7 +71,10 @@ fn step_export_read_by_occt() {
     for (n, a, b) in &boxes {
         let body = m.bodies.iter().find(|x| &x.name == n).unwrap();
         for k in 0..3 {
-            assert!((body.min[k] - a[k]).abs() < 1e-3 && (body.max[k] - b[k]).abs() < 1e-3, "{n}");
+            assert!(
+                (body.min[k] - a[k]).abs() < 1e-3 && (body.max[k] - b[k]).abs() < 1e-3,
+                "{n}"
+            );
         }
     }
 }
@@ -76,8 +90,14 @@ fn real_board_to_solved_case() {
     // ECAD: the KiCad board with a power list
     let (src, imp) = import::import_path(&d.join("pic_programmer_v7.kicad_pcb"), 0.1).unwrap();
     assert_eq!(src, import::Source::KiCad);
-    let import::Imported::Board(mut board) = imp else { panic!() };
-    ferrotherm_io::ecad::apply_power_csv(&mut board, "refdes,power\nU1,0.5\nU5,0.8\nQ1,0.3,40,20\n").unwrap();
+    let import::Imported::Board(mut board) = imp else {
+        panic!()
+    };
+    ferrotherm_io::ecad::apply_power_csv(
+        &mut board,
+        "refdes,power\nU1,0.5\nU5,0.8\nQ1,0.3,40,20\n",
+    )
+    .unwrap();
     let opt = ferrotherm_io::ecad::ToCaseOptions {
         origin: [10.0, 10.0, 5.0],
         ..Default::default()
@@ -105,13 +125,17 @@ max_cell_mm = 4
     // Gerber set of the same board must give the same tile count
     let (src, imp) = import::import_path(&d.join("pic_gerber"), 0.1).unwrap();
     assert_eq!(src, import::Source::Gerber);
-    let import::Imported::Board(mut gb) = imp else { panic!() };
+    let import::Imported::Board(mut gb) = imp else {
+        panic!()
+    };
     let gfr = import::board_fragment(&mut gb, &ferrotherm_io::ecad::ToCaseOptions::default());
     assert!(!gfr.blocks.is_empty());
     // MCAD: STEP via auto-detection
     let (src, imp) = import::import_path(&d.join("TO-220-3_Vertical.step"), 0.1).unwrap();
     assert_eq!(src, import::Source::Step);
-    let import::Imported::Mcad(m) = imp else { panic!() };
+    let import::Imported::Mcad(m) = imp else {
+        panic!()
+    };
     let mfr = import::mcad_to_fragment(
         &m,
         &import::McadOptions {
@@ -125,10 +149,18 @@ max_cell_mm = 4
     let case2 = Case::from_toml(&text).unwrap();
     let lib = ferrotherm_core::library::Library::builtin();
     let sim = Simulation::with_library(case2, lib).unwrap();
-    eprintln!("model: {} cells, {} blocks, {} components", sim.model.ncells, sim.model.blocks.len(), sim.model.components.len());
+    eprintln!(
+        "model: {} cells, {} blocks, {} components",
+        sim.model.ncells,
+        sim.model.blocks.len(),
+        sim.model.components.len()
+    );
     let out = sim.run(|_| {}).unwrap();
     let r = &out.report;
-    eprintln!("Tmax {:.2} C, imbalance {:.4} %", r.t_max_c, r.energy_imbalance_pct);
+    eprintln!(
+        "Tmax {:.2} C, imbalance {:.4} %",
+        r.t_max_c, r.energy_imbalance_pct
+    );
     assert!((r.power_in_w - 1.6).abs() < 1e-9, "{}", r.power_in_w);
     assert!(r.energy_imbalance_pct.abs() < 0.1);
     assert!(r.t_max_c > 25.0);

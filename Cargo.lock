@@ -1475,6 +1475,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ferrotherm-core",
+ "ferrotherm-io",
  "serde",
  "serde_json",
 ]
@@ -1496,6 +1497,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "ferrotherm-core",
+ "ferrotherm-io",
  "rfd",
  "serde_json",
 ]

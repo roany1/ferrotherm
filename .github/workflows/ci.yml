@@ -34,3 +34,7 @@ jobs:
           # exit code 2 = a component exceeded its Tj limit (expected in this example)
           test "${code:-0}" = "0" -o "${code:-0}" = "2"
           test -f example_results/report.md
+          test -f example_results/components.csv
+          cargo run --release -p ferrotherm-cli -- check examples/forced_air_chassis.toml
+          cargo run --release -p ferrotherm-cli -- export examples/mil_enclosure.toml example_results/enclosure.step
+          cargo run --release -p ferrotherm-cli -- cad-info example_results/enclosure.step

@@ -47,7 +47,9 @@ pub fn read(data: &[u8], default_name: &str, scale_to_mm: f64) -> Result<StepMod
     };
     let s = scale_to_mm;
     if let Some(n) = binary_len(data) {
-        let f = |o: usize| f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as f64 * s;
+        let f = |o: usize| {
+            f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as f64 * s
+        };
         let mut tris = Vec::with_capacity(n);
         for i in 0..n {
             let o = 84 + 50 * i + 12;
@@ -68,7 +70,11 @@ pub fn read(data: &[u8], default_name: &str, scale_to_mm: f64) -> Result<StepMod
             match it.next().map(|w| w.to_ascii_lowercase()) {
                 Some(w) if w == "solid" => {
                     let n: Vec<&str> = it.collect();
-                    name = if n.is_empty() { default_name.to_string() } else { n.join(" ") };
+                    name = if n.is_empty() {
+                        default_name.to_string()
+                    } else {
+                        n.join(" ")
+                    };
                 }
                 Some(w) if w == "vertex" => {
                     let v: Vec<f64> = it.filter_map(|x| x.parse().ok()).collect();
@@ -84,7 +90,8 @@ pub fn read(data: &[u8], default_name: &str, scale_to_mm: f64) -> Result<StepMod
                     cur.clear();
                 }
                 Some(w) if w == "endsolid" => {
-                    m.bodies.extend(body(std::mem::take(&mut name), std::mem::take(&mut tris)));
+                    m.bodies
+                        .extend(body(std::mem::take(&mut name), std::mem::take(&mut tris)));
                     name = default_name.to_string();
                 }
                 _ => {}
@@ -124,7 +131,11 @@ pub fn write_boxes(boxes: &[(String, V3, V3)]) -> String {
         ];
         for (q, nv) in faces {
             for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
-                let _ = writeln!(out, "  facet normal {} {} {}\n    outer loop", nv[0], nv[1], nv[2]);
+                let _ = writeln!(
+                    out,
+                    "  facet normal {} {} {}\n    outer loop",
+                    nv[0], nv[1], nv[2]
+                );
                 for k in t {
                     let p = c(k);
                     let _ = writeln!(out, "      vertex {:.6} {:.6} {:.6}", p[0], p[1], p[2]);
@@ -157,7 +168,8 @@ mod tests {
         let mut v = 0.0;
         for t in &m.bodies[0].tris {
             let (a, b, c) = (t[0], t[1], t[2]);
-            v += a[0] * (b[1] * c[2] - c[1] * b[2]) - b[0] * (a[1] * c[2] - c[1] * a[2]) + c[0] * (a[1] * b[2] - b[1] * a[2]);
+            v += a[0] * (b[1] * c[2] - c[1] * b[2]) - b[0] * (a[1] * c[2] - c[1] * a[2])
+                + c[0] * (a[1] * b[2] - b[1] * a[2]);
         }
         assert!(v > 0.0);
         // binary version of the first box
