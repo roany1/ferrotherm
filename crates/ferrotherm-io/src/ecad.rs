@@ -77,12 +77,21 @@ impl Placement {
     /// Axis-aligned footprint on the board (after rotation), mm.
     pub fn footprint(&self) -> Option<(P2, P2)> {
         let (lo, hi) = self.local_bbox?;
-        let corners = [[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]];
+        let corners = [
+            [lo[0], lo[1]],
+            [hi[0], lo[1]],
+            [hi[0], hi[1]],
+            [lo[0], hi[1]],
+        ];
         let pts: Vec<P2> = corners
             .iter()
             .map(|c| {
                 // bottom-side parts are mirrored in x before rotation
-                let c = if self.side == Side::Bottom { [-c[0], c[1]] } else { *c };
+                let c = if self.side == Side::Bottom {
+                    [-c[0], c[1]]
+                } else {
+                    *c
+                };
                 let r = rotate(c, self.rotation_deg);
                 [r[0] + self.x, r[1] + self.y]
             })
@@ -294,7 +303,8 @@ pub fn guess_height(package: &str) -> f64 {
         0.9
     } else if has("qfp") || has("tqfp") || has("lqfp") {
         1.6
-    } else if has("soic") || has("so-") || has("so8") || has("ssop") || has("tssop") || has("msop") {
+    } else if has("soic") || has("so-") || has("so8") || has("ssop") || has("tssop") || has("msop")
+    {
         1.5
     } else if has("sot-23") || has("sot23") || has("sc-70") || has("sot-3") {
         1.1
@@ -320,7 +330,8 @@ pub fn guess_height(package: &str) -> f64 {
 pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
     let mut fr = Fragment::default();
     let Some((lo, hi)) = board.bbox() else {
-        fr.notes.push("the board has no outline and no components".into());
+        fr.notes
+            .push("the board has no outline and no components".into());
         return fr;
     };
     let t_board = board.total_thickness();
@@ -344,12 +355,14 @@ pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
         })
         .collect();
     if coppers.is_empty() {
-        fr.notes.push("no copper layer information: 4 layers × 1 oz, 50 % coverage assumed".into());
+        fr.notes
+            .push("no copper layer information: 4 layers × 1 oz, 50 % coverage assumed".into());
         coppers = vec![(COPPER_OZ_MM, None); 4];
     }
     let cu_total: f64 = coppers.iter().map(|c| c.0).sum();
     if cu_total >= t_board {
-        fr.notes.push("copper thicker than the board: thickness data inconsistent".into());
+        fr.notes
+            .push("copper thicker than the board: thickness data inconsistent".into());
     }
 
     // ---- PCB tiles ----
@@ -389,7 +402,9 @@ pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
             let via_area: f64 = board
                 .drills
                 .iter()
-                .filter(|d| d.plated && d.x >= tlo[0] && d.x < thi[0] && d.y >= tlo[1] && d.y < thi[1])
+                .filter(|d| {
+                    d.plated && d.x >= tlo[0] && d.x < thi[0] && d.y >= tlo[1] && d.y < thi[1]
+                })
                 .map(|d| {
                     let ro = 0.5 * d.d_mm;
                     let ri = (ro - VIA_PLATING_MM).max(0.0);
@@ -523,7 +538,10 @@ pub fn apply_power_csv(board: &mut Board, text: &str) -> Result<usize, String> {
             continue;
         }
         let sep = if line.contains(';') { ';' } else { ',' };
-        let f: Vec<&str> = line.split(sep).map(|s| s.trim().trim_matches('"')).collect();
+        let f: Vec<&str> = line
+            .split(sep)
+            .map(|s| s.trim().trim_matches('"'))
+            .collect();
         if f.len() < 2 {
             continue;
         }
@@ -534,7 +552,11 @@ pub fn apply_power_csv(board: &mut Board, text: &str) -> Result<usize, String> {
             return Err(format!("line {}: power '{}' is not a number", ln + 1, f[1]));
         };
         let num = |i: usize| f.get(i).and_then(|s| s.parse::<f64>().ok());
-        match board.components.iter_mut().find(|c| c.refdes.eq_ignore_ascii_case(f[0])) {
+        match board
+            .components
+            .iter_mut()
+            .find(|c| c.refdes.eq_ignore_ascii_case(f[0]))
+        {
             Some(c) => {
                 c.power_w = Some(p);
                 c.r_jc = num(2).or(c.r_jc);

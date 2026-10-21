@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 ferrotherm-core = { path = "../ferrotherm-core" }
+ferrotherm-io = { path = "../ferrotherm-io" }
 anyhow.workspace = true
 serde.workspace = true
 clap.workspace = true

@@ -224,7 +224,14 @@ pub struct Stats {
 /// BiCGSTAB with DILU preconditioning. Stops when ‖r‖ ≤ rtol·‖r0‖ or
 /// ‖r‖ ≤ atol. Non-convergence is reported in the stats, not as an error
 /// (outer iterations decide).
-pub fn bicgstab(m: &Stencil, b: &[f64], x: &mut [f64], rtol: f64, atol: f64, max_iter: usize) -> Stats {
+pub fn bicgstab(
+    m: &Stencil,
+    b: &[f64],
+    x: &mut [f64],
+    rtol: f64,
+    atol: f64,
+    max_iter: usize,
+) -> Stats {
     bicgstab_with(m, b, x, rtol, atol, max_iter, Pre::Dilu)
 }
 
@@ -323,7 +330,14 @@ pub fn bicgstab_with(
 
 /// Preconditioned conjugate gradient for symmetric positive (semi-)definite
 /// stencils (pressure correction, wall distance).
-pub fn pcg(m: &Stencil, b: &[f64], x: &mut [f64], rtol: f64, atol: f64, max_iter: usize) -> Result<Stats> {
+pub fn pcg(
+    m: &Stencil,
+    b: &[f64],
+    x: &mut [f64],
+    rtol: f64,
+    atol: f64,
+    max_iter: usize,
+) -> Result<Stats> {
     pcg_with(m, b, x, rtol, atol, max_iter, Pre::Dilu)
 }
 
@@ -500,10 +514,17 @@ mod mg_tests {
         let t0 = std::time::Instant::now();
         let g = pcg_with(&m, &b, &mut x2, 1e-8, 0.0, 5000, Pre::Mg).unwrap();
         let tg = t0.elapsed();
-        eprintln!("DILU {} it {:?}, MG {} it {:?}", a.iterations, ta, g.iterations, tg);
+        eprintln!(
+            "DILU {} it {:?}, MG {} it {:?}",
+            a.iterations, ta, g.iterations, tg
+        );
         assert!(a.converged && g.converged);
         assert!(g.iterations * 3 < a.iterations);
-        let err = x1.iter().zip(&x2).map(|(p, q)| (p - q).abs()).fold(0.0, f64::max);
+        let err = x1
+            .iter()
+            .zip(&x2)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0, f64::max);
         let scale = x1.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         assert!(err < 1e-5 * scale);
     }

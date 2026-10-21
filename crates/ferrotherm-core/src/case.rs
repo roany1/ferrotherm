@@ -287,7 +287,10 @@ impl HeatSink {
             "x" => Ok(0usize),
             "y" => Ok(1),
             "z" => Ok(2),
-            o => Err(Error::Invalid(format!("heat sink '{}': bad axis '{o}'", self.name))),
+            o => Err(Error::Invalid(format!(
+                "heat sink '{}': bad axis '{o}'",
+                self.name
+            ))),
         };
         let n = ax(&self.normal)?;
         let f = ax(&self.fin_axis)?;

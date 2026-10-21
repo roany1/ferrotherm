@@ -16,7 +16,10 @@ pub struct XNode {
 
 impl XNode {
     pub fn attr(&self, k: &str) -> Option<&str> {
-        self.attrs.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str())
+        self.attrs
+            .iter()
+            .find(|(a, _)| a == k)
+            .map(|(_, v)| v.as_str())
     }
     pub fn num(&self, k: &str) -> Option<f64> {
         self.attr(k)?.trim().parse().ok()

@@ -55,15 +55,37 @@ pub const FILTERS: &[(&str, &[&str])] = &[
     (
         "All supported",
         &[
-            "step", "stp", "p21", "stl", "emn", "brd", "bdf", "idb", "kicad_pcb", "gbrjob", "gbr", "gtl", "gbl", "gko",
-            "gm1", "xml", "cvg", "tgz", "gz", "tar", "zip",
+            "step",
+            "stp",
+            "p21",
+            "stl",
+            "emn",
+            "brd",
+            "bdf",
+            "idb",
+            "kicad_pcb",
+            "gbrjob",
+            "gbr",
+            "gtl",
+            "gbl",
+            "gko",
+            "gm1",
+            "xml",
+            "cvg",
+            "tgz",
+            "gz",
+            "tar",
+            "zip",
         ],
     ),
     ("STEP (MCAD)", &["step", "stp", "p21"]),
     ("STL", &["stl"]),
     ("IDF 3.0", &["emn", "brd", "bdf", "idb"]),
     ("KiCad board", &["kicad_pcb"]),
-    ("Gerber job / Gerber file", &["gbrjob", "gbr", "gtl", "gbl", "gko", "gm1"]),
+    (
+        "Gerber job / Gerber file",
+        &["gbrjob", "gbr", "gtl", "gbl", "gko", "gm1"],
+    ),
     ("IPC-2581", &["xml", "cvg"]),
     ("ODB++ / Gerber archive", &["tgz", "gz", "tar", "zip"]),
 ];
@@ -82,8 +104,8 @@ fn ext_of(name: &str) -> String {
 }
 
 const GERBER_EXT: &[&str] = &[
-    "gbr", "gtl", "gbl", "gts", "gbs", "gto", "gbo", "gtp", "gbp", "gko", "gm1", "gml", "g1", "g2", "g3", "g4", "drl",
-    "xln", "gbrjob", "pho", "art", "ger",
+    "gbr", "gtl", "gbl", "gts", "gbs", "gto", "gbo", "gtp", "gbp", "gko", "gm1", "gml", "g1", "g2",
+    "g3", "g4", "drl", "xln", "gbrjob", "pho", "art", "ger",
 ];
 
 fn is_ipc(text: &str) -> bool {
@@ -106,20 +128,32 @@ pub fn detect_files(files: &Files) -> Option<Source> {
             return Some(Source::Ipc2581);
         }
     }
-    if names.iter().any(|n| matches!(ext_of(n).as_str(), "emn" | "bdf" | "idb")) {
+    if names
+        .iter()
+        .any(|n| matches!(ext_of(n).as_str(), "emn" | "bdf" | "idb"))
+    {
         return Some(Source::Idf);
     }
-    if names.iter().any(|n| GERBER_EXT.contains(&ext_of(n).as_str())) {
+    if names
+        .iter()
+        .any(|n| GERBER_EXT.contains(&ext_of(n).as_str()))
+    {
         return Some(Source::Gerber);
     }
-    if names.iter().any(|n| matches!(ext_of(n).as_str(), "step" | "stp" | "p21")) {
+    if names
+        .iter()
+        .any(|n| matches!(ext_of(n).as_str(), "step" | "stp" | "p21"))
+    {
         return Some(Source::Step);
     }
     if names.iter().any(|n| ext_of(n) == "stl") {
         return Some(Source::Stl);
     }
     // Gerber files without a known extension
-    if files.iter().any(|(_, d)| String::from_utf8_lossy(&d[..d.len().min(4096)]).contains("%FS")) {
+    if files
+        .iter()
+        .any(|(_, d)| String::from_utf8_lossy(&d[..d.len().min(4096)]).contains("%FS"))
+    {
         return Some(Source::Gerber);
     }
     None
@@ -134,15 +168,26 @@ fn read_idf_files(files: &Files) -> Result<Board, String> {
         .iter()
         .find(|(n, _)| matches!(ext_of(n).as_str(), "emn" | "bdf" | "idb" | "brd"))
         .ok_or("no IDF board file")?;
-    let stem = bn.rsplit_once('.').map(|s| s.0).unwrap_or(bn).to_ascii_lowercase();
+    let stem = bn
+        .rsplit_once('.')
+        .map(|s| s.0)
+        .unwrap_or(bn)
+        .to_ascii_lowercase();
     let lib = files
         .iter()
         .filter(|(n, _)| matches!(ext_of(n).as_str(), "emp" | "lib" | "ldf" | "idl"))
-        .min_by_key(|(n, _)| if n.to_ascii_lowercase().starts_with(&stem) { 0 } else { 1 })
+        .min_by_key(|(n, _)| {
+            if n.to_ascii_lowercase().starts_with(&stem) {
+                0
+            } else {
+                1
+            }
+        })
         .map(|(_, d)| text(d));
     let mut b = crate::idf::read(&text(bd), lib.as_deref())?;
     if lib.is_none() {
-        b.warnings.push("no IDF library file (.emp) found: part outlines and heights unknown".into());
+        b.warnings
+            .push("no IDF library file (.emp) found: part outlines and heights unknown".into());
     }
     Ok(b)
 }
@@ -161,7 +206,10 @@ pub fn read_files(src: Source, files: Files, tolerance_mm: f64) -> Result<Import
         Source::Ipc2581 => {
             let (_, d) = files
                 .iter()
-                .find(|(n, d)| matches!(ext_of(n).as_str(), "xml" | "cvg") && is_ipc(&text(&d[..d.len().min(8192)])))
+                .find(|(n, d)| {
+                    matches!(ext_of(n).as_str(), "xml" | "cvg")
+                        && is_ipc(&text(&d[..d.len().min(8192)]))
+                })
                 .ok_or("no IPC-2581 file")?;
             crate::ipc2581::read(&text(d)).map(Imported::Board)
         }
@@ -171,7 +219,10 @@ pub fn read_files(src: Source, files: Files, tolerance_mm: f64) -> Result<Import
                 .iter()
                 .filter(|(n, _)| {
                     let e = ext_of(n);
-                    !matches!(e.as_str(), "pdf" | "png" | "jpg" | "step" | "stp" | "kicad_pcb" | "zip")
+                    !matches!(
+                        e.as_str(),
+                        "pdf" | "png" | "jpg" | "step" | "stp" | "kicad_pcb" | "zip"
+                    )
                 })
                 .map(|(n, d)| (n.clone(), archive::text_of(n, d)))
                 .collect();
@@ -185,7 +236,10 @@ pub fn read_files(src: Source, files: Files, tolerance_mm: f64) -> Result<Import
             step::read(&text(d), tolerance_mm).map(Imported::Mcad)
         }
         Source::Stl => {
-            let (n, d) = files.iter().find(|(n, _)| ext_of(n) == "stl").ok_or("no STL file")?;
+            let (n, d) = files
+                .iter()
+                .find(|(n, _)| ext_of(n) == "stl")
+                .ok_or("no STL file")?;
             let stem = n.rsplit('/').next().unwrap_or(n);
             let stem = stem.rsplit_once('.').map(|s| s.0).unwrap_or(stem);
             crate::stl::read(d, stem, 1.0).map(Imported::Mcad)
@@ -195,11 +249,30 @@ pub fn read_files(src: Source, files: Files, tolerance_mm: f64) -> Result<Import
 
 /// Read any supported file or folder. `tolerance_mm`: STEP tessellation.
 pub fn import_path(path: &Path, tolerance_mm: f64) -> Result<(Source, Imported), String> {
+    let (src, mut imp) = import_path_raw(path, tolerance_mm)?;
+    // give unnamed boards the file name
+    if let Imported::Board(b) = &mut imp {
+        let generic = b.name.trim().is_empty()
+            || b.name == "kicad_pcb"
+            || b.name.eq_ignore_ascii_case("unnamed");
+        if generic {
+            if let Some(stem) = path.file_stem() {
+                b.name = stem.to_string_lossy().trim_end_matches(".tar").to_string();
+            }
+        }
+    }
+    Ok((src, imp))
+}
+
+fn import_path_raw(path: &Path, tolerance_mm: f64) -> Result<(Source, Imported), String> {
     let l = lower(path);
     let e = ext_of(&l);
     let single = |src: Source| -> Result<(Source, Imported), String> {
         let d = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         Ok((src, read_files(src, vec![(name, d)], tolerance_mm)?))
     };
     if path.is_file() {
@@ -225,20 +298,27 @@ pub fn import_path(path: &Path, tolerance_mm: f64) -> Result<(Source, Imported),
             }
             _ => {}
         }
-        let archive = l.ends_with(".zip") || l.ends_with(".tgz") || l.ends_with(".tar.gz") || l.ends_with(".tar");
+        let archive = l.ends_with(".zip")
+            || l.ends_with(".tgz")
+            || l.ends_with(".tar.gz")
+            || l.ends_with(".tar");
         if !archive {
             // a file of a Gerber set: read its folder
             if GERBER_EXT.contains(&e.as_str()) {
                 if let Some(dir) = path.parent() {
                     let files = archive::load(dir)?;
-                    return Ok((Source::Gerber, read_files(Source::Gerber, files, tolerance_mm)?));
+                    return Ok((
+                        Source::Gerber,
+                        read_files(Source::Gerber, files, tolerance_mm)?,
+                    ));
                 }
             }
             return Err(format!("{}: unknown file type", path.display()));
         }
     }
     let files = archive::load(path)?;
-    let src = detect_files(&files).ok_or_else(|| format!("{}: no supported CAD data found", path.display()))?;
+    let src = detect_files(&files)
+        .ok_or_else(|| format!("{}: no supported CAD data found", path.display()))?;
     Ok((src, read_files(src, files, tolerance_mm)?))
 }
 
@@ -278,12 +358,18 @@ pub fn mcad_to_fragment(m: &StepModel, opt: &McadOptions) -> Fragment {
     let mut skipped = 0;
     let mut pcbs = 0;
     for b in &m.bodies {
-        let bv = (0..3).map(|a| (b.max[a] - b.min[a]).max(0.0)).product::<f64>();
+        let bv = (0..3)
+            .map(|a| (b.max[a] - b.min[a]).max(0.0))
+            .product::<f64>();
         if bv < opt.min_volume_mm3 {
             skipped += 1;
             continue;
         }
-        let ext = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
+        let ext = [
+            b.max[0] - b.min[0],
+            b.max[1] - b.min[1],
+            b.max[2] - b.min[2],
+        ];
         let thin = ext[2] < 3.5 && ext[2] > 0.2 && ext[0].min(ext[1]) > 10.0 * ext[2];
         let is_pcb = opt.detect_pcb && thin && {
             let n = b.name.to_ascii_lowercase();
@@ -301,8 +387,16 @@ pub fn mcad_to_fragment(m: &StepModel, opt: &McadOptions) -> Fragment {
             } else {
                 format!("{}{}", opt.prefix, b.name)
             };
-            let min = [lo[0] + opt.offset[0], lo[1] + opt.offset[1], lo[2] + opt.offset[2]];
-            let max = [hi[0] + opt.offset[0], hi[1] + opt.offset[1], hi[2] + opt.offset[2]];
+            let min = [
+                lo[0] + opt.offset[0],
+                lo[1] + opt.offset[1],
+                lo[2] + opt.offset[2],
+            ];
+            let max = [
+                hi[0] + opt.offset[0],
+                hi[1] + opt.offset[1],
+                hi[2] + opt.offset[2],
+            ];
             let block = if is_pcb {
                 pcbs += 1;
                 Block {
@@ -349,7 +443,8 @@ pub fn mcad_to_fragment(m: &StepModel, opt: &McadOptions) -> Fragment {
         ));
     }
     if m.bodies.iter().any(|b| b.bbox_only) {
-        fr.notes.push("some bodies have only a bounding box (not tessellated)".into());
+        fr.notes
+            .push("some bodies have only a bounding box (not tessellated)".into());
     }
     extent(&mut fr);
     fr
@@ -391,10 +486,18 @@ fn unique(name: &str, taken: &mut std::collections::HashSet<String>) -> String {
 }
 
 /// Add a fragment to a case. Names that clash get a `~N` suffix. With
-/// `fit_domain`, the domain grows to contain the fragment plus `margin_mm`.
+/// `fit_domain`, the domain grows to contain the fragment plus `margin_mm`
+/// (or is set to it when the case had no geometry yet).
 /// Returns notes for the user.
-pub fn merge_into_case(case: &mut Case, fr: Fragment, fit_domain: bool, margin_mm: f64) -> Vec<String> {
+pub fn merge_into_case(
+    case: &mut Case,
+    fr: Fragment,
+    fit_domain: bool,
+    margin_mm: f64,
+) -> Vec<String> {
     let mut notes = fr.notes.clone();
+    let was_empty =
+        case.blocks.is_empty() && case.components.is_empty() && case.heatsinks.is_empty();
     let mut taken: std::collections::HashSet<String> = case
         .blocks
         .iter()
@@ -415,11 +518,21 @@ pub fn merge_into_case(case: &mut Case, fr: Fragment, fit_domain: bool, margin_m
         case.components.push(c);
     }
     if renamed > 0 {
-        notes.push(format!("{renamed} names already in use were given a ~N suffix"));
+        notes.push(format!(
+            "{renamed} names already in use were given a ~N suffix"
+        ));
     }
     if fr.min[0].is_finite() {
-        let inside = (0..3).all(|a| fr.min[a] >= case.domain.min[a] - 1e-9 && fr.max[a] <= case.domain.max[a] + 1e-9);
-        if fit_domain {
+        let inside = (0..3).all(|a| {
+            fr.min[a] >= case.domain.min[a] - 1e-9 && fr.max[a] <= case.domain.max[a] + 1e-9
+        });
+        if fit_domain && was_empty {
+            // nothing else in the model: the domain wraps the import
+            for a in 0..3 {
+                case.domain.min[a] = fr.min[a] - margin_mm;
+                case.domain.max[a] = fr.max[a] + margin_mm;
+            }
+        } else if fit_domain {
             for a in 0..3 {
                 case.domain.min[a] = case.domain.min[a].min(fr.min[a] - margin_mm);
                 case.domain.max[a] = case.domain.max[a].max(fr.max[a] + margin_mm);

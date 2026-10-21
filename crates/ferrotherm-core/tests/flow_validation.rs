@@ -72,7 +72,10 @@ fn poiseuille_channel() {
     let y = |z: f64| 6.0 * 0.05 * (z / 0.01) * (1.0 - z / 0.01);
     let cell_avg = |z0: f64, z1: f64| {
         let m = 200;
-        (0..m).map(|k| y(z0 + (z1 - z0) * (k as f64 + 0.5) / m as f64)).sum::<f64>() / m as f64
+        (0..m)
+            .map(|k| y(z0 + (z1 - z0) * (k as f64 + 0.5) / m as f64))
+            .sum::<f64>()
+            / m as f64
     };
     let expect = cell_avg(0.0045, 0.0055);
     eprintln!("POISEUILLE u_centre {umid:.5} expect {expect:.5}");
@@ -128,7 +131,11 @@ fn cavity(ra: f64, cells: usize) -> f64 {
     ));
     let out = s.run(|_| {}).unwrap();
     let f = out.result.flow.as_ref().unwrap();
-    assert!(f.converged, "Ra {ra}: not converged {:?}", f.residuals.last());
+    assert!(
+        f.converged,
+        "Ra {ra}: not converged {:?}",
+        f.residuals.last()
+    );
     let q_hot = -out.report.boundaries[0].heat_out_w; // heat entering at the hot wall
     let area = l * 1e-3;
     let nu_num = q_hot / (AIR_K * dt / l * area);
@@ -186,7 +193,10 @@ fn forced_convection_energy_balance() {
     let f = out.result.flow.as_ref().unwrap();
     eprintln!(
         "FORCED: converged {} it {} imbalance {:.3e} % advected {:.4} W, heater max {:.2}",
-        f.converged, f.iterations, out.report.energy_imbalance_pct, out.report.advected_out_w,
+        f.converged,
+        f.iterations,
+        out.report.energy_imbalance_pct,
+        out.report.advected_out_w,
         out.report.blocks[0].t_max_c
     );
     assert!(f.converged);
@@ -256,7 +266,10 @@ fn fan_operating_point() {
     let k = 0.5 * AIR_RHO * (1.0 + 3.0 + 0.01) / (a * a);
     // 20 (1 − Q/0.02) = k Q²  →  k Q² + 1000 Q − 20 = 0
     let qx = (-1000.0 + (1000.0f64 * 1000.0 + 4.0 * k * 20.0).sqrt()) / (2.0 * k);
-    eprintln!("FAN: Q {q:.6} expected {qx:.6}, dp {:.3} Pa", f.fans[0].pressure_pa);
+    eprintln!(
+        "FAN: Q {q:.6} expected {qx:.6}, dp {:.3} Pa",
+        f.fans[0].pressure_pa
+    );
     assert!((q / qx - 1.0).abs() < 0.02);
 }
 
@@ -303,7 +316,9 @@ fn radiation_parallel_plates() {
     // view factor of aligned parallel rectangles X = Y = 100/5 = 20
     let (x, y): (f64, f64) = (20.0, 20.0);
     let f12 = 2.0 / (std::f64::consts::PI * x * y)
-        * (((1.0 + x * x) * (1.0 + y * y) / (1.0 + x * x + y * y)).sqrt().ln()
+        * (((1.0 + x * x) * (1.0 + y * y) / (1.0 + x * x + y * y))
+            .sqrt()
+            .ln()
             + x * (1.0 + y * y).sqrt() * (x / (1.0 + y * y).sqrt()).atan()
             + y * (1.0 + x * x).sqrt() * (y / (1.0 + x * x).sqrt()).atan()
             - x * x.atan()
@@ -316,7 +331,10 @@ fn radiation_parallel_plates() {
     let qrad = a * SIGMA * (t1.powi(4) - t2.powi(4))
         / ((1.0 - 0.8) / 0.8 + 1.0 / feff + (1.0 - 0.6) / 0.6);
     let qcond = AIR_K * a * 80.0 / 0.005;
-    eprintln!("RAD: q {q:.4} W, expected {:.4} (rad {qrad:.4} + cond {qcond:.4}), F12 {f12:.4}", qrad + qcond);
+    eprintln!(
+        "RAD: q {q:.4} W, expected {:.4} (rad {qrad:.4} + cond {qcond:.4}), F12 {f12:.4}",
+        qrad + qcond
+    );
     assert!((q / (qrad + qcond) - 1.0).abs() < 0.03);
 }
 
@@ -378,7 +396,12 @@ fn solar_flux_plate() {
         absorptivity = 0.4
     "#);
     let out = s.run(|_| {}).unwrap();
-    let t = out.report.blocks.first().map(|b| b.t_avg_c).unwrap_or(out.report.t_max_c);
+    let t = out
+        .report
+        .blocks
+        .first()
+        .map(|b| b.t_avg_c)
+        .unwrap_or(out.report.t_max_c);
     eprintln!("SOLAR: T {t:.4} expected {:.4}", 30.0 + 0.4 * 1000.0 / 10.0);
     assert!((out.report.t_max_c - 70.0).abs() < 0.01);
     assert!(out.report.energy_imbalance_pct.abs() < 1e-6);
@@ -438,7 +461,10 @@ fn network_matches_2r() {
     let a = two_r.run(|_| {}).unwrap().report.components[0].tj_c;
     let b = net.run(|_| {}).unwrap();
     let tj = b.report.components[0].tj_c;
-    eprintln!("NETWORK: 2R Tj {a:.4}, network Tj {tj:.4}; nodes {:?}", b.report.components[0].nodes);
+    eprintln!(
+        "NETWORK: 2R Tj {a:.4}, network Tj {tj:.4}; nodes {:?}",
+        b.report.components[0].nodes
+    );
     assert!((a - tj).abs() / (a - 40.0) < 0.02);
     assert!(b.report.energy_imbalance_pct.abs() < 1e-6);
 }

@@ -65,7 +65,7 @@ fn opt_num(
     speed: f64,
     suffix: &str,
     none_text: &str,
-) {
+) -> egui::Response {
     ui.horizontal(|ui| {
         let mut on = v.is_some();
         if ui.checkbox(&mut on, "").changed() {
@@ -79,7 +79,8 @@ fn opt_num(
                 ui.label(RichText::new(none_text).weak().italics());
             }
         }
-    });
+    })
+    .response
 }
 
 fn axis_combo(ui: &mut Ui, salt: &str, axis: &mut String) {
@@ -255,8 +256,8 @@ pub fn domain(ui: &mut Ui, d: &mut Domain, lib: &Library) {
     ui.add_space(6.0);
     ui.label(
         RichText::new(
-            "Everything not covered by a block is filled with this material. \
-             Phase 0 has no fluid flow: internal air conducts only.",
+            "Everything not covered by a block is filled with this material. With the air \
+             flow off, the fill only conducts ('air-still'); for CFD choose 'air' (Model > Air flow).",
         )
         .weak(),
     );
@@ -943,6 +944,9 @@ pub fn boundary(
             BoundaryKind::Fixed => "Fixed temperature",
             BoundaryKind::Convection => "Convection (+ radiation)",
             BoundaryKind::Radiation => "Radiation only",
+            BoundaryKind::Opening => "Opening / vent (flow)",
+            BoundaryKind::Inlet => "Inlet, fixed flow",
+            BoundaryKind::Symmetry => "Symmetry plane",
         };
         ComboBox::from_id_salt(format!("bk{idx}"))
             .width(200.0)
@@ -954,6 +958,9 @@ pub fn boundary(
                     BoundaryKind::Radiation,
                     BoundaryKind::Fixed,
                     BoundaryKind::Adiabatic,
+                    BoundaryKind::Opening,
+                    BoundaryKind::Inlet,
+                    BoundaryKind::Symmetry,
                 ] {
                     ui.selectable_value(&mut b.kind, k, kname(k));
                 }
@@ -997,7 +1004,73 @@ pub fn boundary(
                 );
                 ui.end_row();
             }
+            BoundaryKind::Opening | BoundaryKind::Inlet => {
+                if b.kind == BoundaryKind::Inlet {
+                    let by_flow = b.flow_m3_s.is_some();
+                    ui.label("Inflow");
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(!by_flow, "velocity").clicked() && by_flow {
+                            b.flow_m3_s = None;
+                            b.velocity_m_s = Some(1.0);
+                        }
+                        if ui.selectable_label(by_flow, "volume flow").clicked() && !by_flow {
+                            b.velocity_m_s = None;
+                            b.flow_m3_s = Some(0.005);
+                        }
+                    });
+                    ui.end_row();
+                    if b.velocity_m_s.is_none() && b.flow_m3_s.is_none() {
+                        b.velocity_m_s = Some(1.0);
+                    }
+                    if let Some(v) = &mut b.velocity_m_s {
+                        ui.label("Velocity (into the domain)");
+                        num_min(ui, v, 0.01, 0.0, " m/s");
+                        ui.end_row();
+                    }
+                    if let Some(q) = &mut b.flow_m3_s {
+                        ui.label("Volume flow");
+                        ui.horizontal(|ui| {
+                            num_min(ui, q, 0.0001, 0.0, " m³/s");
+                            ui.label(
+                                RichText::new(format!("= {:.2} CFM", *q / crate::flow_ui::CFM))
+                                    .weak(),
+                            );
+                        });
+                        ui.end_row();
+                    }
+                }
+                ui.label("Air temperature in");
+                opt_num(
+                    ui,
+                    &mut b.t_ambient_c,
+                    ambient.unwrap_or(25.0),
+                    0.5,
+                    " °C",
+                    &amb_text,
+                );
+                ui.end_row();
+            }
             _ => {}
+        }
+        if matches!(
+            b.kind,
+            BoundaryKind::Convection | BoundaryKind::Radiation | BoundaryKind::Fixed
+        ) {
+            ui.label("Heat flux in");
+            opt_num(ui, &mut b.heat_flux_w_m2, 100.0, 1.0, " W/m²", "none")
+                .on_hover_text("Imposed absorbed flux (e.g. a measured load)");
+            ui.end_row();
+            ui.label("Solar irradiance");
+            opt_num(ui, &mut b.solar_w_m2, 1120.0, 5.0, " W/m²", "none").on_hover_text(
+                "Absorbed fraction = absorptivity. MIL-STD-810H Method 505 uses up to \
+                     1120 W/m² peak for hot climatic categories.",
+            );
+            ui.end_row();
+            if b.solar_w_m2.is_some() {
+                ui.label("Solar absorptivity");
+                opt_num(ui, &mut b.absorptivity, 0.9, 0.01, "", "1.0");
+                ui.end_row();
+            }
         }
         if matches!(b.kind, BoundaryKind::Convection | BoundaryKind::Radiation) {
             ui.label("Emissivity");
@@ -1108,6 +1181,29 @@ pub fn boundary(
         });
         ui.end_row();
     });
+    if b.kind == BoundaryKind::Opening {
+        ui.add_space(6.0);
+        let mut on = b.loss.is_some();
+        if ui
+            .checkbox(&mut on, "Grille / perforated plate on the vent")
+            .changed()
+        {
+            b.loss = on.then(|| ferrotherm_core::case::Loss {
+                zeta: 1.0,
+                ..Default::default()
+            });
+        }
+        if let Some(l) = &mut b.loss {
+            crate::flow_ui::loss_editor(ui, l, &format!("bloss{idx}"));
+        }
+        ui.label(
+            RichText::new(
+                "An opening is at ambient pressure: air leaves or enters (at the air temperature \
+                 above) as the flow requires. Needs [flow] enabled.",
+            )
+            .weak(),
+        );
+    }
     ui.add_space(6.0);
     ui.label(
         RichText::new(

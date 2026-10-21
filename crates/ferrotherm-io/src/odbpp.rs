@@ -29,7 +29,9 @@ impl Tree {
             .iter()
             .find_map(|(p, _)| {
                 let l = p.to_ascii_lowercase();
-                l.strip_suffix("matrix/matrix").or_else(|| l.strip_suffix("matrix/matrix.z")).map(|r| r.to_string())
+                l.strip_suffix("matrix/matrix")
+                    .or_else(|| l.strip_suffix("matrix/matrix.z"))
+                    .map(|r| r.to_string())
             })
             .unwrap_or_default();
         let mut map = HashMap::new();
@@ -67,7 +69,10 @@ fn parse_matrix(text: &str) -> (Vec<String>, Vec<MatrixLayer>) {
     for line in text.lines() {
         let l = line.trim();
         if l.ends_with('{') {
-            cur = Some((l.trim_end_matches('{').trim().to_ascii_uppercase(), HashMap::new()));
+            cur = Some((
+                l.trim_end_matches('{').trim().to_ascii_uppercase(),
+                HashMap::new(),
+            ));
         } else if l == "}" {
             if let Some((kind, kv)) = cur.take() {
                 if kind == "STEP" {
@@ -77,9 +82,21 @@ fn parse_matrix(text: &str) -> (Vec<String>, Vec<MatrixLayer>) {
                 } else if kind == "LAYER" {
                     layers.push(MatrixLayer {
                         row: kv.get("ROW").and_then(|v| v.parse().ok()).unwrap_or(0),
-                        context: kv.get("CONTEXT").cloned().unwrap_or_default().to_ascii_uppercase(),
-                        typ: kv.get("TYPE").cloned().unwrap_or_default().to_ascii_uppercase(),
-                        name: kv.get("NAME").cloned().unwrap_or_default().to_ascii_lowercase(),
+                        context: kv
+                            .get("CONTEXT")
+                            .cloned()
+                            .unwrap_or_default()
+                            .to_ascii_uppercase(),
+                        typ: kv
+                            .get("TYPE")
+                            .cloned()
+                            .unwrap_or_default()
+                            .to_ascii_uppercase(),
+                        name: kv
+                            .get("NAME")
+                            .cloned()
+                            .unwrap_or_default()
+                            .to_ascii_lowercase(),
                     });
                 }
             }
@@ -105,7 +122,11 @@ fn units_of(text: &str) -> f64 {
     for l in text.lines().take(50) {
         let l = l.trim();
         if let Some(u) = l.strip_prefix("UNITS=").or_else(|| l.strip_prefix("U ")) {
-            return if u.trim().eq_ignore_ascii_case("MM") { 1.0 } else { 25.4 };
+            return if u.trim().eq_ignore_ascii_case("MM") {
+                1.0
+            } else {
+                25.4
+            };
         }
     }
     25.4 // ODB++ default unit is the inch
@@ -196,10 +217,8 @@ fn surface_contours(lines: &[&str], scale: f64) -> Vec<Poly> {
                     }
                 }
             }
-            Some("OE") => {
-                if cur.len() >= 3 {
-                    out.push(std::mem::take(&mut cur));
-                }
+            Some("OE") if cur.len() >= 3 => {
+                out.push(std::mem::take(&mut cur));
             }
             _ => {}
         }
@@ -271,13 +290,23 @@ fn draw_features(text: &str, r: &mut Raster, pads: &mut Vec<(P2, f64)>) {
             }
             Some("P") if f.len() >= 6 => {
                 let c = [num(1) * scale, num(2) * scale];
-                let (sym_k, rest) = if f[3] == "-1" { (num(4) as usize, 5) } else { (num(3) as usize, 4) };
+                let (sym_k, rest) = if f[3] == "-1" {
+                    (num(4) as usize, 5)
+                } else {
+                    (num(3) as usize, 4)
+                };
                 let dark = f.get(rest).map(|v| *v != "N").unwrap_or(true);
-                let orient = f.get(rest + 2).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                let orient = f
+                    .get(rest + 2)
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .unwrap_or(0);
                 // ODB++ angles are clockwise
                 let rot = match orient {
                     0..=7 => -90.0 * (orient % 4) as f64,
-                    _ => -f.get(rest + 3).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0),
+                    _ => -f
+                        .get(rest + 3)
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0),
                 };
                 match syms.get(&sym_k) {
                     Some(Sym::Round(d)) => {
@@ -287,13 +316,18 @@ fn draw_features(text: &str, r: &mut Raster, pads: &mut Vec<(P2, f64)>) {
                     Some(Sym::Rect(w, h)) => r.rect(c, *w, *h, rot, dark),
                     Some(Sym::Oval(w, h)) => r.obround(c, *w, *h, rot, dark),
                     Some(Sym::Diamond(w, h)) => {
-                        let pts: Vec<P2> = [[0.5 * w, 0.0], [0.0, 0.5 * h], [-0.5 * w, 0.0], [0.0, -0.5 * h]]
-                            .iter()
-                            .map(|p| {
-                                let q = rotate(*p, rot);
-                                [q[0] + c[0], q[1] + c[1]]
-                            })
-                            .collect();
+                        let pts: Vec<P2> = [
+                            [0.5 * w, 0.0],
+                            [0.0, 0.5 * h],
+                            [-0.5 * w, 0.0],
+                            [0.0, -0.5 * h],
+                        ]
+                        .iter()
+                        .map(|p| {
+                            let q = rotate(*p, rot);
+                            [q[0] + c[0], q[1] + c[1]]
+                        })
+                        .collect();
                         r.fill_poly(&pts, dark);
                     }
                     Some(Sym::Donut(od, id)) => {
@@ -328,7 +362,9 @@ fn draw_features(text: &str, r: &mut Raster, pads: &mut Vec<(P2, f64)>) {
 /// Read an ODB++ product (files from a folder or archive).
 pub fn read(files: Files) -> Result<Board, String> {
     let tree = Tree::new(files);
-    let matrix = tree.get("matrix/matrix").ok_or("not an ODB++ product (matrix/matrix missing)")?;
+    let matrix = tree
+        .get("matrix/matrix")
+        .ok_or("not an ODB++ product (matrix/matrix missing)")?;
     let (steps, layers) = parse_matrix(&matrix);
     // step: prefer "pcb", else the first
     let step = steps
@@ -340,14 +376,21 @@ pub fn read(files: Files) -> Result<Board, String> {
     let sdir = format!("steps/{step}");
     let mut board = Board {
         format: "ODB++".into(),
-        name: if tree.root.is_empty() { step.clone() } else { tree.root.trim_end_matches('/').to_string() },
+        name: if tree.root.is_empty() {
+            step.clone()
+        } else {
+            tree.root.trim_end_matches('/').to_string()
+        },
         ..Default::default()
     };
     // thickness
     if let Some(a) = tree.get(&format!("{sdir}/attrlist")) {
         let u = units_of(&a);
         let kv = attrlist(&a);
-        if let Some(t) = kv.get(".board_thickness").and_then(|v| v.parse::<f64>().ok()) {
+        if let Some(t) = kv
+            .get(".board_thickness")
+            .and_then(|v| v.parse::<f64>().ok())
+        {
             // stored in microns (MM) or mils (INCH)
             board.thickness_mm = Some(t * u / 1000.0);
         }
@@ -359,7 +402,9 @@ pub fn read(files: Files) -> Result<Board, String> {
         board.outline = surface_contours(&lines, scale);
     }
     if board.outline.is_empty() {
-        board.warnings.push("no step profile; using the copper/component extent".into());
+        board
+            .warnings
+            .push("no step profile; using the copper/component extent".into());
     }
     // packages
     let mut pkgs: Vec<(String, (P2, P2))> = Vec::new();
@@ -369,14 +414,20 @@ pub fn read(files: Files) -> Result<Board, String> {
             let l = l.split(';').next().unwrap_or("").trim();
             if let Some(rest) = l.strip_prefix("PKG ") {
                 let f: Vec<&str> = rest.split_whitespace().collect();
-                let num = |k: usize| f.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) * scale;
-                pkgs.push((f.first().unwrap_or(&"").to_string(), ([num(2), num(3)], [num(4), num(5)])));
+                let num =
+                    |k: usize| f.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) * scale;
+                pkgs.push((
+                    f.first().unwrap_or(&"").to_string(),
+                    ([num(2), num(3)], [num(4), num(5)]),
+                ));
             }
         }
     }
     // components
     for (side, layer) in [(Side::Top, "comp_+_top"), (Side::Bottom, "comp_+_bot")] {
-        let Some(t) = tree.get(&format!("{sdir}/layers/{layer}/components")) else { continue };
+        let Some(t) = tree.get(&format!("{sdir}/layers/{layer}/components")) else {
+            continue;
+        };
         let scale = units_of(&t);
         let mut attr_names: HashMap<usize, String> = HashMap::new();
         for l in t.lines() {
@@ -389,7 +440,9 @@ pub fn read(files: Files) -> Result<Board, String> {
                 }
                 continue;
             }
-            let Some(rest) = l.strip_prefix("CMP ") else { continue };
+            let Some(rest) = l.strip_prefix("CMP ") else {
+                continue;
+            };
             let (rec, attrs) = rest.split_once(';').unwrap_or((rest, ""));
             let f: Vec<&str> = rec.split_whitespace().collect();
             if f.len() < 6 {
@@ -402,13 +455,18 @@ pub fn read(files: Files) -> Result<Board, String> {
                 .map(|p| (p.0.clone(), Some(p.1)))
                 .unwrap_or((format!("pkg{pkg}"), None));
             // ODB++ rotation is clockwise
-            let mut pl = Placement::new(f[5], &pname, num(1) * scale, num(2) * scale, -num(3), side);
+            let mut pl =
+                Placement::new(f[5], &pname, num(1) * scale, num(2) * scale, -num(3), side);
             pl.part = f.get(6).unwrap_or(&"").to_string();
             pl.local_bbox = pbox;
             for kv in attrs.split(',') {
                 if let Some((k, v)) = kv.split_once('=') {
                     if let Ok(k) = k.trim().parse::<usize>() {
-                        if attr_names.get(&k).map(|n| n == ".comp_height").unwrap_or(false) {
+                        if attr_names
+                            .get(&k)
+                            .map(|n| n == ".comp_height")
+                            .unwrap_or(false)
+                        {
                             pl.height_mm = v.trim().parse::<f64>().ok().map(|h| h * scale);
                         }
                     }
@@ -434,13 +492,10 @@ pub fn read(files: Files) -> Result<Board, String> {
                     draw_features(t, &mut r, &mut pads);
                 }
                 // .copper_weight: microns (MM) or oz (INCH)
-                let t = kv.get(".copper_weight").and_then(|v| v.parse::<f64>().ok()).map(|w| {
-                    if u == 1.0 {
-                        w / 1000.0
-                    } else {
-                        w * 0.035
-                    }
-                });
+                let t = kv
+                    .get(".copper_weight")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|w| if u == 1.0 { w / 1000.0 } else { w * 0.035 });
                 board.layers.push(Layer {
                     name: l.name.clone(),
                     kind: LayerKind::Copper,
@@ -450,7 +505,10 @@ pub fn read(files: Files) -> Result<Board, String> {
                 });
             }
             "DIELECTRIC" => {
-                let t = kv.get(".layer_dielectric").and_then(|v| v.parse::<f64>().ok()).map(|v| v * u);
+                let t = kv
+                    .get(".layer_dielectric")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|v| v * u);
                 board.layers.push(Layer {
                     name: l.name.clone(),
                     kind: LayerKind::Dielectric,
@@ -466,7 +524,12 @@ pub fn read(files: Files) -> Result<Board, String> {
                     draw_features(t, &mut sink, &mut pads);
                     let plated = !l.name.contains("npth") && !l.name.contains("non");
                     for (c, d) in pads {
-                        board.drills.push(Drill { x: c[0], y: c[1], d_mm: d, plated });
+                        board.drills.push(Drill {
+                            x: c[0],
+                            y: c[1],
+                            d_mm: d,
+                            plated,
+                        });
                     }
                 }
             }
@@ -474,10 +537,17 @@ pub fn read(files: Files) -> Result<Board, String> {
         }
     }
     if board.copper_layers().count() == 0 {
-        board.warnings.push("no SIGNAL/POWER_GROUND layers in the matrix".into());
+        board
+            .warnings
+            .push("no SIGNAL/POWER_GROUND layers in the matrix".into());
     }
     if board.outline.is_empty() {
-        let pts: Vec<P2> = board.components.iter().filter_map(|c| c.footprint()).flat_map(|(a, b)| [a, b]).collect();
+        let pts: Vec<P2> = board
+            .components
+            .iter()
+            .filter_map(|c| c.footprint())
+            .flat_map(|(a, b)| [a, b])
+            .collect();
         if let Some((lo, hi)) = bbox(&pts) {
             board.outline = vec![vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]];
         }
@@ -517,7 +587,10 @@ mod tests {
         assert!((s.size_mm[0] - 50.0).abs() < 1e-9 && (s.size_mm[1] - 30.0).abs() < 1e-9);
         // F.Cu: 30x1 line + caps + 2x1 pad + 5x5 surface
         let fcu = s.copper_layers[0].2 * 1500.0;
-        assert!((fcu - (30.0 + std::f64::consts::FRAC_PI_4 + 2.0 + 25.0)).abs() < 1.0, "{fcu}");
+        assert!(
+            (fcu - (30.0 + std::f64::consts::FRAC_PI_4 + 2.0 + 25.0)).abs() < 1.0,
+            "{fcu}"
+        );
         // B.Cu: plane with a 10x10 hole
         let bcu = s.copper_layers[1].2 * 1500.0;
         assert!((bcu - 1400.0).abs() < 3.0, "{bcu}");
@@ -534,7 +607,9 @@ mod tests {
     #[test]
     fn symbols() {
         assert!(matches!(parse_symbol("r10", 0.0254), Sym::Round(d) if (d - 0.254).abs() < 1e-12));
-        assert!(matches!(parse_symbol("rect20x10xr2", 1.0), Sym::Rect(w, h) if w == 20.0 && h == 10.0));
+        assert!(
+            matches!(parse_symbol("rect20x10xr2", 1.0), Sym::Rect(w, h) if w == 20.0 && h == 10.0)
+        );
         assert!(matches!(parse_symbol("oval5x3", 1.0), Sym::Oval(..)));
         assert!(matches!(parse_symbol("s7", 1.0), Sym::Rect(w, _) if w == 7.0));
         assert!(matches!(parse_symbol("donut_r10x5", 1.0), Sym::Donut(..)));

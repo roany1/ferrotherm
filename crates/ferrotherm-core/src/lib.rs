@@ -115,7 +115,10 @@ impl Simulation {
 
     /// Run with an observer that receives every [`simulate::Event`] and can
     /// cancel by returning `false`.
-    pub fn run_observed(&self, observer: &mut dyn FnMut(simulate::Event) -> bool) -> Result<Output> {
+    pub fn run_observed(
+        &self,
+        observer: &mut dyn FnMut(simulate::Event) -> bool,
+    ) -> Result<Output> {
         let result = if self.has_flow() {
             flow::run(&self.model, &self.case, self.s2s.as_ref(), observer)?
         } else {

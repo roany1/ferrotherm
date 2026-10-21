@@ -356,3 +356,213 @@ fn history_chart(ui: &mut Ui, s: &Solved) {
         egui::StrokeKind::Inside,
     );
 }
+
+/// Normalised flow residuals vs iteration (log scale).
+pub fn residual_chart(ui: &mut Ui, hist: &[(usize, [f64; 3])], tol: f64) {
+    let size = Vec2::new(ui.available_width().min(900.0), 200.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter_at(rect);
+    let weak = ui.visuals().weak_text_color();
+    let text = ui.visuals().text_color();
+    let plot = egui::Rect::from_min_max(
+        Pos2::new(rect.left() + 46.0, rect.top() + 8.0),
+        Pos2::new(rect.right() - 120.0, rect.bottom() - 22.0),
+    );
+    let n0 = hist.first().map(|h| h.0).unwrap_or(0) as f64;
+    let n1 = (hist.last().map(|h| h.0).unwrap_or(1) as f64).max(n0 + 1.0);
+    let mut lo = tol.log10().floor() - 0.5;
+    let mut hi = lo + 1.0;
+    // the first iterations start from rest and can be huge: keep them out
+    // of the scale (they are clipped at the top)
+    for (_, r) in hist.iter().skip(if hist.len() > 5 { 3 } else { 0 }) {
+        for v in r {
+            if *v > 0.0 && v.is_finite() {
+                lo = lo.min(v.log10());
+                hi = hi.max(v.log10());
+            }
+        }
+    }
+    lo = lo.floor().max(tol.log10() - 4.0);
+    hi = hi.ceil().clamp(lo + 1.0, tol.log10() + 5.0).max(lo + 1.0);
+    let px = |x: f64| plot.left() + ((x - n0) / (n1 - n0)) as f32 * plot.width();
+    let py = |v: f64| {
+        let l = v.max(1e-300).log10().clamp(lo, hi);
+        plot.bottom() - ((l - lo) / (hi - lo)) as f32 * plot.height()
+    };
+    let grid = Stroke::new(1.0, weak.gamma_multiply(0.35));
+    let mut e = lo;
+    while e <= hi + 1e-9 {
+        let y = py(10f64.powf(e));
+        painter.line_segment(
+            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+            grid,
+        );
+        painter.text(
+            Pos2::new(plot.left() - 6.0, y),
+            Align2::RIGHT_CENTER,
+            format!("1e{e:.0}"),
+            FontId::proportional(10.0),
+            weak,
+        );
+        e += 1.0;
+    }
+    let xs = nice_step(n1 - n0, 6);
+    let mut x = (n0 / xs).ceil() * xs;
+    while x <= n1 + 1e-9 {
+        painter.text(
+            Pos2::new(px(x), plot.bottom() + 3.0),
+            Align2::CENTER_TOP,
+            format!("{x:.0}"),
+            FontId::proportional(10.0),
+            weak,
+        );
+        x += xs;
+    }
+    // tolerance line
+    let yt = py(tol);
+    let mut xx = plot.left();
+    while xx < plot.right() {
+        painter.line_segment(
+            [
+                Pos2::new(xx, yt),
+                Pos2::new((xx + 6.0).min(plot.right()), yt),
+            ],
+            Stroke::new(1.0, WARN),
+        );
+        xx += 10.0;
+    }
+    for (k, name) in ["mass", "momentum", "energy"].iter().enumerate() {
+        let col = SERIES[k];
+        let pts: Vec<Pos2> = hist
+            .iter()
+            .map(|(i, r)| Pos2::new(px(*i as f64), py(r[k])))
+            .collect();
+        painter.add(egui::Shape::line(pts, Stroke::new(1.6, col)));
+        let ly = plot.top() + 6.0 + k as f32 * 16.0;
+        painter.line_segment(
+            [
+                Pos2::new(plot.right() + 12.0, ly),
+                Pos2::new(plot.right() + 28.0, ly),
+            ],
+            Stroke::new(2.5, col),
+        );
+        painter.text(
+            Pos2::new(plot.right() + 34.0, ly),
+            Align2::LEFT_CENTER,
+            *name,
+            FontId::proportional(11.0),
+            text,
+        );
+    }
+    painter.text(
+        Pos2::new(plot.right() + 12.0, plot.top() + 6.0 + 3.0 * 16.0),
+        Align2::LEFT_CENTER,
+        "- - target",
+        FontId::proportional(11.0),
+        WARN,
+    );
+    painter.rect_stroke(
+        plot,
+        0.0,
+        Stroke::new(1.0, weak.gamma_multiply(0.6)),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Fans, openings and monitor points of a flow solution.
+pub fn flow_tables(ui: &mut Ui, f: &ferrotherm_core::flow::FlowResult) {
+    ui.add_space(6.0);
+    ui.label(format!(
+        "{} iterations · {} · max air speed {:.3} m/s · {} / {}",
+        f.iterations,
+        if f.converged {
+            if f.converged_by_monitors {
+                "converged (temperatures settled)"
+            } else {
+                "converged (residuals)"
+            }
+        } else {
+            "NOT converged: raise max iterations or check the model"
+        },
+        f.max_speed_m_s,
+        f.fluid,
+        f.turbulence
+    ));
+    if f.averaged_iterations > 0 {
+        ui.colored_label(
+            WARN,
+            format!(
+                "The steady iteration oscillates (key temperatures ±{:.2} K): fields averaged over the last {} \
+                 iterations. Lower the velocity/pressure relaxation or run a transient.",
+                0.5 * f.oscillation_k,
+                f.averaged_iterations
+            ),
+        );
+    }
+    ui.horizontal_top(|ui| {
+        if !f.fans.is_empty() {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Fans").strong());
+                Grid::new("res_fans")
+                    .striped(true)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in ["Name", "Q [m³/s]", "CFM", "Δp [Pa]"] {
+                            ui.label(RichText::new(h).weak());
+                        }
+                        ui.end_row();
+                        for x in &f.fans {
+                            ui.label(&x.name);
+                            ui.label(format!("{:.5}", x.flow_m3_s));
+                            ui.label(format!("{:.2}", x.flow_m3_s / crate::flow_ui::CFM));
+                            ui.label(format!("{:.1}", x.pressure_pa));
+                            ui.end_row();
+                        }
+                    });
+            });
+            ui.add_space(24.0);
+        }
+        if !f.openings.is_empty() {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Openings").strong());
+                Grid::new("res_open")
+                    .striped(true)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in ["Name", "In [m³/s]", "Out [m³/s]", "Heat out [W]"] {
+                            ui.label(RichText::new(h).weak());
+                        }
+                        ui.end_row();
+                        for x in &f.openings {
+                            ui.label(&x.name);
+                            ui.label(format!("{:.5}", x.inflow_m3_s));
+                            ui.label(format!("{:.5}", x.outflow_m3_s));
+                            ui.label(format!("{:.3}", x.heat_out_w));
+                            ui.end_row();
+                        }
+                    });
+            });
+            ui.add_space(24.0);
+        }
+        if !f.monitors.is_empty() {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Monitor points").strong());
+                Grid::new("res_mon")
+                    .striped(true)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in ["Name", "T [°C]", "Speed [m/s]"] {
+                            ui.label(RichText::new(h).weak());
+                        }
+                        ui.end_row();
+                        for x in &f.monitors {
+                            ui.label(&x.name);
+                            ui.label(format!("{:.2}", x.t_c));
+                            ui.label(format!("{:.3}", x.speed_m_s));
+                            ui.end_row();
+                        }
+                    });
+            });
+        }
+    });
+}

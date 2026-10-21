@@ -8,6 +8,8 @@
 
 mod app;
 mod colormap;
+mod flow_ui;
+mod import_ui;
 mod inspector;
 mod raster;
 mod results;

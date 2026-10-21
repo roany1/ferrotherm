@@ -26,7 +26,11 @@ pub fn case_boxes(case: &Case, lib: &Library) -> Result<Vec<(String, V3, V3)>, S
 }
 
 pub fn case_to_step(case: &Case, lib: &Library) -> Result<String, String> {
-    let name = if case.meta.title.is_empty() { "ferrotherm" } else { &case.meta.title };
+    let name = if case.meta.title.is_empty() {
+        "ferrotherm"
+    } else {
+        &case.meta.title
+    };
     Ok(crate::step::write_boxes(name, &case_boxes(case, lib)?))
 }
 
@@ -41,7 +45,11 @@ pub fn case_to_idf(case: &Case, lib: &Library) -> Result<(String, String), Strin
     let blocks = all_blocks(case).map_err(|e| e.to_string())?;
     let pcbs: Vec<_> = blocks
         .iter()
-        .filter(|(b, _)| b.pcb.as_ref().is_some_and(|p| p.normal.trim_start_matches(['+', '-']) == "z"))
+        .filter(|(b, _)| {
+            b.pcb
+                .as_ref()
+                .is_some_and(|p| p.normal.trim_start_matches(['+', '-']) == "z")
+        })
         .collect();
     if pcbs.is_empty() {
         return Err("the case has no PCB block (normal z) to export as an IDF board".into());
@@ -55,7 +63,12 @@ pub fn case_to_idf(case: &Case, lib: &Library) -> Result<(String, String), Strin
         }
     }
     let thickness = hi[2] - lo[2];
-    let outline = vec![[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]];
+    let outline = vec![
+        [lo[0], lo[1]],
+        [hi[0], lo[1]],
+        [hi[0], hi[1]],
+        [lo[0], hi[1]],
+    ];
     let tol = 1e-6;
     let mut parts = Vec::new();
     let mut push = |name: &str, package: &str, a: V3, b: V3| {
@@ -86,9 +99,18 @@ pub fn case_to_idf(case: &Case, lib: &Library) -> Result<(String, String), Strin
     }
     for (b, _) in &blocks {
         if b.pcb.is_none() {
-            push(&b.name, b.material.as_deref().unwrap_or("block"), b.min, b.max);
+            push(
+                &b.name,
+                b.material.as_deref().unwrap_or("block"),
+                b.min,
+                b.max,
+            );
         }
     }
-    let name = if case.meta.title.is_empty() { "ferrotherm" } else { &case.meta.title };
+    let name = if case.meta.title.is_empty() {
+        "ferrotherm"
+    } else {
+        &case.meta.title
+    };
     Ok(crate::idf::write(name, &outline, thickness, &parts))
 }

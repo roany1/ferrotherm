@@ -149,7 +149,11 @@ impl Multigrid {
     }
 
     fn cycle(&self, k: usize, fine: &Stencil, b: &[f64], x: &mut [f64]) {
-        let adj = if k == 0 { Some(self.adj.as_slice()) } else { None };
+        let adj = if k == 0 {
+            Some(self.adj.as_slice())
+        } else {
+            None
+        };
         if k == self.levels.len() {
             // coarsest: a few sweeps
             for _ in 0..20 {

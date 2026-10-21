@@ -1,11 +1,22 @@
 // Summary of a STEP file as FerroTherm sees it (debug tool).
 fn main() {
-    let p = std::env::args().nth(1).expect("usage: stepinfo FILE.step [tolerance_mm]");
-    let tol: f64 = std::env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(0.1);
+    let p = std::env::args()
+        .nth(1)
+        .expect("usage: stepinfo FILE.step [tolerance_mm]");
+    let tol: f64 = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.1);
     let text = std::fs::read_to_string(&p).unwrap();
     let t0 = std::time::Instant::now();
     let m = ferrotherm_io::step::read(&text, tol).unwrap();
-    println!("{} bodies, {} products, {} occurrences in {:?}", m.bodies.len(), m.products, m.occurrences, t0.elapsed());
+    println!(
+        "{} bodies, {} products, {} occurrences in {:?}",
+        m.bodies.len(),
+        m.products,
+        m.occurrences,
+        t0.elapsed()
+    );
     for w in &m.warnings {
         println!("warning: {w}");
     }

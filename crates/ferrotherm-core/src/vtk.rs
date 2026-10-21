@@ -12,7 +12,13 @@ fn push_array(out: &mut String, name: &str, ty: &str, vals: impl Iterator<Item =
     push_array_n(out, name, ty, 1, vals)
 }
 
-fn push_array_n(out: &mut String, name: &str, ty: &str, comps: usize, vals: impl Iterator<Item = String>) {
+fn push_array_n(
+    out: &mut String,
+    name: &str,
+    ty: &str,
+    comps: usize,
+    vals: impl Iterator<Item = String>,
+) {
     let _ = writeln!(
         out,
         "        <DataArray type=\"{ty}\" Name=\"{name}\" NumberOfComponents=\"{comps}\" format=\"ascii\">"
@@ -99,17 +105,24 @@ pub fn vtr(m: &Model, s: &Snapshot) -> String {
             "velocity_m_s",
             "Float32",
             3,
-            v.iter().map(|u| format!("{:.6e} {:.6e} {:.6e}", u[0], u[1], u[2])),
+            v.iter()
+                .map(|u| format!("{:.6e} {:.6e} {:.6e}", u[0], u[1], u[2])),
         );
         push_array(
             &mut out,
             "speed_m_s",
             "Float32",
-            v.iter().map(|u| format!("{:.6e}", (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt())),
+            v.iter()
+                .map(|u| format!("{:.6e}", (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt())),
         );
     }
     if let Some(p) = &s.p {
-        push_array(&mut out, "pressure_Pa", "Float32", p.iter().map(|v| format!("{v:.6e}")));
+        push_array(
+            &mut out,
+            "pressure_Pa",
+            "Float32",
+            p.iter().map(|v| format!("{v:.6e}")),
+        );
     }
     out.push_str("      </CellData>\n      <Coordinates>\n");
     for (a, name) in ["x_mm", "y_mm", "z_mm"].iter().enumerate() {

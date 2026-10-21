@@ -50,6 +50,10 @@ pub struct FlowSummary {
     /// Final normalised [mass, momentum, energy] residuals.
     pub final_residuals: [f64; 3],
     pub max_speed_m_s: f64,
+    /// Fields averaged over this many final iterations (not converged).
+    pub averaged_iterations: usize,
+    /// Peak-to-peak key-temperature variation over the last 50 iterations, K.
+    pub oscillation_k: f64,
     pub fans: Vec<FanResult>,
     pub openings: Vec<OpeningResult>,
     pub monitors: Vec<MonitorResult>,
@@ -153,8 +157,16 @@ pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
         } else {
             (qs[0], qs[1])
         };
-        let t_case = if c.network { None } else { c.r_jc.map(|r| tj - qc * r) };
-        let t_board = if c.network { None } else { c.r_jb.map(|r| tj - qb * r) };
+        let t_case = if c.network {
+            None
+        } else {
+            c.r_jc.map(|r| tj - qc * r)
+        };
+        let t_board = if c.network {
+            None
+        } else {
+            c.r_jb.map(|r| tj - qb * r)
+        };
         let (lim, src) = match &c.tj_limit {
             Some((l, s)) => (Some(*l), Some(s.clone())),
             None => (None, None),
@@ -225,6 +237,8 @@ pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
             converged_by_monitors: f.converged_by_monitors,
             final_residuals: f.residuals.last().copied().unwrap_or([0.0; 3]),
             max_speed_m_s: f.max_speed_m_s,
+            averaged_iterations: f.averaged_iterations,
+            oscillation_k: f.oscillation_k,
             fans: f.fans.clone(),
             openings: f.openings.clone(),
             monitors: f
@@ -357,6 +371,14 @@ impl Report {
                 f.final_residuals[2],
                 f.max_speed_m_s
             );
+            if f.averaged_iterations > 0 {
+                s += &format!(
+                    "> The steady iteration did not settle: key temperatures still varied by {:.2} K over the last 50 iterations \
+                     (usually a physically unsteady flow). Results use flow fields averaged over the last {} iterations; \
+                     treat temperatures as ± half that variation. Lower `relax_velocity`/`relax_pressure`, raise `max_iterations` or run a transient.\n\n",
+                    f.oscillation_k, f.averaged_iterations
+                );
+            }
             if !f.fans.is_empty() {
                 s += "| Fan | Flow [m³/s] | Flow [CFM] | Static pressure [Pa] |\n|---|---:|---:|---:|\n";
                 for fan in &f.fans {

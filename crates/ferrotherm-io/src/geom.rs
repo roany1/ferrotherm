@@ -13,7 +13,9 @@ pub fn arc_points(center: P2, start: P2, sweep_deg: f64, out: &mut Vec<P2>) {
     let r = ((start[0] - center[0]).powi(2) + (start[1] - center[1]).powi(2)).sqrt();
     let a0 = (start[1] - center[1]).atan2(start[0] - center[0]);
     let sweep = sweep_deg.to_radians();
-    let n = ((sweep.abs() / (2.0 * std::f64::consts::PI)) * 72.0).ceil().max(2.0) as usize;
+    let n = ((sweep.abs() / (2.0 * std::f64::consts::PI)) * 72.0)
+        .ceil()
+        .max(2.0) as usize;
     for k in 1..=n {
         let a = a0 + sweep * k as f64 / n as f64;
         out.push([center[0] + r * a.cos(), center[1] + r * a.sin()]);
@@ -120,7 +122,8 @@ impl Raster {
             return;
         }
         let j0 = (((ymin - self.lo[1]) / self.res).floor().max(0.0)) as usize;
-        let j1 = ((((ymax - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize) as usize;
+        let j1 =
+            ((((ymax - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize) as usize;
         let mut xs: Vec<f64> = Vec::new();
         for j in j0..j1 {
             let y = self.lo[1] + (j as f64 + 0.5) * self.res;
@@ -141,7 +144,8 @@ impl Raster {
                     break;
                 }
                 let i0 = ((pair[0] - self.lo[0]) / self.res - 0.5).ceil().max(0.0) as usize;
-                let i1 = (((pair[1] - self.lo[0]) / self.res - 0.5).floor() as isize).min(self.w as isize - 1);
+                let i1 = (((pair[1] - self.lo[0]) / self.res - 0.5).floor() as isize)
+                    .min(self.w as isize - 1);
                 if i1 < 0 {
                     continue;
                 }
@@ -157,9 +161,11 @@ impl Raster {
     /// Filled disc.
     pub fn disc(&mut self, c: P2, r: f64, v: bool) {
         let i0 = (((c[0] - r - self.lo[0]) / self.res).floor().max(0.0)) as usize;
-        let i1 = ((((c[0] + r - self.lo[0]) / self.res).ceil()) as isize).clamp(0, self.w as isize) as usize;
+        let i1 = ((((c[0] + r - self.lo[0]) / self.res).ceil()) as isize).clamp(0, self.w as isize)
+            as usize;
         let j0 = (((c[1] - r - self.lo[1]) / self.res).floor().max(0.0)) as usize;
-        let j1 = ((((c[1] + r - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize) as usize;
+        let j1 = ((((c[1] + r - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize)
+            as usize;
         let r2 = r * r;
         for j in j0..j1 {
             let y = self.lo[1] + (j as f64 + 0.5) * self.res - c[1];
@@ -177,9 +183,11 @@ impl Raster {
         let r = 0.5 * width;
         let (lo, hi) = bbox(&[a, b]).unwrap();
         let i0 = (((lo[0] - r - self.lo[0]) / self.res).floor().max(0.0)) as usize;
-        let i1 = ((((hi[0] + r - self.lo[0]) / self.res).ceil()) as isize).clamp(0, self.w as isize) as usize;
+        let i1 = ((((hi[0] + r - self.lo[0]) / self.res).ceil()) as isize).clamp(0, self.w as isize)
+            as usize;
         let j0 = (((lo[1] - r - self.lo[1]) / self.res).floor().max(0.0)) as usize;
-        let j1 = ((((hi[1] + r - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize) as usize;
+        let j1 = ((((hi[1] + r - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize)
+            as usize;
         let d = [b[0] - a[0], b[1] - a[1]];
         let l2 = d[0] * d[0] + d[1] * d[1];
         let r2 = r * r;
@@ -203,13 +211,18 @@ impl Raster {
 
     /// Rotated rectangle centred at `c` (w × h, rotation in degrees).
     pub fn rect(&mut self, c: P2, w: f64, h: f64, rot_deg: f64, v: bool) {
-        let pts: Vec<P2> = [[-0.5 * w, -0.5 * h], [0.5 * w, -0.5 * h], [0.5 * w, 0.5 * h], [-0.5 * w, 0.5 * h]]
-            .iter()
-            .map(|p| {
-                let q = rotate(*p, rot_deg);
-                [q[0] + c[0], q[1] + c[1]]
-            })
-            .collect();
+        let pts: Vec<P2> = [
+            [-0.5 * w, -0.5 * h],
+            [0.5 * w, -0.5 * h],
+            [0.5 * w, 0.5 * h],
+            [-0.5 * w, 0.5 * h],
+        ]
+        .iter()
+        .map(|p| {
+            let q = rotate(*p, rot_deg);
+            [q[0] + c[0], q[1] + c[1]]
+        })
+        .collect();
         self.fill_poly(&pts, v);
     }
 
@@ -222,15 +235,22 @@ impl Raster {
         let (len, dia) = if w > h { (w - h, h) } else { (h - w, w) };
         let dir = if w > h { [1.0, 0.0] } else { [0.0, 1.0] };
         let d = rotate([dir[0] * 0.5 * len, dir[1] * 0.5 * len], rot_deg);
-        self.segment([c[0] - d[0], c[1] - d[1]], [c[0] + d[0], c[1] + d[1]], dia, v);
+        self.segment(
+            [c[0] - d[0], c[1] - d[1]],
+            [c[0] + d[0], c[1] + d[1]],
+            dia,
+            v,
+        );
     }
 
     /// Fraction of set pixels in a rectangle (board coordinates).
     pub fn coverage(&self, lo: P2, hi: P2) -> f64 {
         let i0 = (((lo[0] - self.lo[0]) / self.res).floor().max(0.0)) as usize;
-        let i1 = ((((hi[0] - self.lo[0]) / self.res).ceil()) as isize).clamp(0, self.w as isize) as usize;
+        let i1 = ((((hi[0] - self.lo[0]) / self.res).ceil()) as isize).clamp(0, self.w as isize)
+            as usize;
         let j0 = (((lo[1] - self.lo[1]) / self.res).floor().max(0.0)) as usize;
-        let j1 = ((((hi[1] - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize) as usize;
+        let j1 = ((((hi[1] - self.lo[1]) / self.res).ceil()) as isize).clamp(0, self.h as isize)
+            as usize;
         let mut set = 0usize;
         let mut tot = 0usize;
         for j in j0..j1 {

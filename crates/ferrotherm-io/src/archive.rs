@@ -29,7 +29,9 @@ pub fn load(path: &Path) -> Result<Files, String> {
         untar(&data[..])
     } else {
         Ok(vec![(
-            path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            path.file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
             data,
         )])
     }
@@ -42,7 +44,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Files) -> Result<(), String> {
         if p.is_dir() {
             walk(root, &p, out)?;
         } else if let Ok(d) = std::fs::read(&p) {
-            let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
             out.push((rel, d));
         }
     }
@@ -82,7 +88,11 @@ pub fn untar<R: Read>(r: R) -> Result<Files, String> {
         if total > MAX_TOTAL {
             return Err("archive too large".into());
         }
-        let p = e.path().map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
+        let p = e
+            .path()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
         let mut v = Vec::new();
         e.read_to_end(&mut v).map_err(|e| e.to_string())?;
         out.push((p, v));
@@ -201,8 +211,13 @@ mod tests {
     /// zt.txt.Z + the original under testdata name).
     #[test]
     fn lzw_matches_compress() {
-        let Some(d) = std::env::var_os("FT_ZTEST").map(std::path::PathBuf::from) else { return };
-        for (z, orig) in [("zt.txt.Z", "dl/pic_programmer_v7.kicad_pcb"), ("rnd2.bin.Z", "rnd.bin")] {
+        let Some(d) = std::env::var_os("FT_ZTEST").map(std::path::PathBuf::from) else {
+            return;
+        };
+        for (z, orig) in [
+            ("zt.txt.Z", "dl/pic_programmer_v7.kicad_pcb"),
+            ("rnd2.bin.Z", "rnd.bin"),
+        ] {
             let zd = std::fs::read(d.join(z)).unwrap();
             let o = std::fs::read(d.join(orig)).unwrap();
             let u = uncompress_z(&zd).unwrap();

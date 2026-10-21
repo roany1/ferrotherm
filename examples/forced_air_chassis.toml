@@ -1,0 +1,177 @@
+# FerroTherm example — forced-air electronics chassis (CFD)
+# Author: Roany Romano
+#
+# Units: mm, °C, W, W/(m² K), s, m³/s, Pa
+# A 40 mm fan on the front (x min) pushes air across a board with a finned
+# heat sink on the processor; the air leaves through a perforated vent on the
+# back (x max). Thermal resistances and the fan curve marked "EXAMPLE" are
+# illustrative: replace them with datasheet values before drawing conclusions.
+
+[meta]
+title = "Forced-air chassis with fan, vent and heat sink"
+author = "Roany Romano"
+description = "Conjugate heat transfer: SIMPLEC + LVEL, fan curve, perforated outlet, finned heat sink, monitor points"
+
+[domain]
+min = [0, 0, 0]
+max = [200, 120, 45]
+material = "air"                # fluid with viscosity: the flow is solved
+
+[grid]
+max_cell_mm = 3.0
+
+[flow]
+turbulence = "lvel"
+max_iterations = 600
+relax_velocity = 0.3            # lower than the default 0.6: the fan jet makes the
+relax_pressure = 0.5            # steady iteration oscillate with stronger relaxation
+
+[solver]
+mode = "steady"
+
+# ---------------------------------------------------------------- chassis (side walls, floor, lid)
+[[blocks]]
+name = "floor"
+material = "al-5052-h32"
+min = [0, 0, 0]
+max = [200, 120, 2]
+
+[[blocks]]
+name = "lid"
+material = "al-5052-h32"
+min = [0, 0, 43]
+max = [200, 120, 45]
+
+[[blocks]]
+name = "wall_ymin"
+material = "al-5052-h32"
+min = [0, 0, 2]
+max = [200, 2, 43]
+
+[[blocks]]
+name = "wall_ymax"
+material = "al-5052-h32"
+min = [0, 118, 2]
+max = [200, 120, 43]
+
+# ---------------------------------------------------------------- board on standoffs
+[[blocks]]
+name = "standoff_1"
+material = "al-6061-t6"
+min = [12, 12, 2]
+max = [18, 18, 10]
+
+[[blocks]]
+name = "standoff_2"
+material = "al-6061-t6"
+min = [182, 12, 2]
+max = [188, 18, 10]
+
+[[blocks]]
+name = "standoff_3"
+material = "al-6061-t6"
+min = [12, 102, 2]
+max = [18, 108, 10]
+
+[[blocks]]
+name = "standoff_4"
+material = "al-6061-t6"
+min = [182, 102, 2]
+max = [188, 108, 10]
+
+[[blocks]]
+name = "pcb"
+min = [10, 10, 10]
+max = [190, 110, 11.6]
+pcb = { thickness_mm = 1.6, layers = 6, copper_oz = 1.0, coverage = 0.5 }
+
+# ---------------------------------------------------------------- parts
+[[components]]
+name = "U1_CPU"
+package = "bga-17x17"
+position = [70, 51.5, 11.6]
+power_w = 10.0
+r_jc = 0.3                      # EXAMPLE value: use the datasheet
+r_jb = 5.0                      # EXAMPLE value: use the datasheet
+case_face = "top"
+derating = "sd18-plastic1-up-normal"
+
+[[components]]
+name = "Q1_REG"
+package = "d2pak"
+position = [140, 30, 11.6]
+power_w = 2.0
+r_jc = 1.5                      # EXAMPLE value: use the datasheet
+case_face = "bottom"
+tj_max_c = 125.0
+
+[[components]]
+name = "U2_FPGA"
+package = "bga-17x17"
+position = [140, 75, 11.6]
+power_w = 3.0
+r_jc = 0.5                      # EXAMPLE value: use the datasheet
+r_jb = 6.0                      # EXAMPLE value: use the datasheet
+case_face = "top"
+derating = "sd18-plastic1-up-normal"
+
+# Thermal pad between U1 and the heat sink
+[[blocks]]
+name = "tim_u1"
+material = "tim-grease"
+min = [70, 51.5, 13.4]
+max = [87, 68.5, 13.5]
+
+[[heatsinks]]
+name = "hs_u1"
+material = "al-6061-t6"
+position = [66, 48, 13.5]       # base min corner
+base = [25, 24, 3]              # length along the fins, width, thickness
+fin_axis = "x"                  # fins parallel to the main air stream
+fin_count = 7
+fin_thickness = 1.0
+fin_height = 20.0
+
+# ---------------------------------------------------------------- air path
+# A fan on the domain wall draws ambient air (here 40 °C, from the vent below)
+[[fans]]
+name = "inlet_fan"
+center = [0, 60, 25]
+direction = "+x"
+diameter = 38
+hub_diameter = 15
+# EXAMPLE 40 mm fan curve [m³/s, Pa]: replace with the datasheet curve
+curve = [[0.0, 45.0], [0.002, 35.0], [0.004, 20.0], [0.006, 6.0], [0.0068, 0.0]]
+
+[[boundaries]]
+name = "rear_vent"
+face = "xmax"
+region = { min = [20, 8], max = [100, 38] }   # (y, z) on the x max face
+type = "opening"
+t_ambient_c = 40.0
+loss = { zeta = 4.0, free_area = 0.5, hole_diameter_mm = 3.0 }   # EXAMPLE perforated plate
+
+# External natural convection + radiation from the lid and the floor
+[[boundaries]]
+name = "lid_outside"
+face = "zmax"
+type = "convection"
+h = 5.0
+t_ambient_c = 40.0
+emissivity = 0.85
+
+[[boundaries]]
+name = "floor_outside"
+face = "zmin"
+type = "convection"
+h = 3.0
+t_ambient_c = 40.0
+emissivity = 0.85
+
+[[monitors]]
+name = "air_outlet"
+position = [195, 60, 25]
+
+[[monitors]]
+name = "air_above_cpu"
+position = [78, 60, 38]

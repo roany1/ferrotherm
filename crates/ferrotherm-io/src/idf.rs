@@ -85,7 +85,11 @@ fn loops(lines: &[Vec<String>], scale: f64) -> Vec<Poly> {
         if f.len() < 4 {
             continue;
         }
-        let (Ok(x), Ok(y), Ok(ang)) = (f[1].parse::<f64>(), f[2].parse::<f64>(), f[3].parse::<f64>()) else {
+        let (Ok(x), Ok(y), Ok(ang)) = (
+            f[1].parse::<f64>(),
+            f[2].parse::<f64>(),
+            f[3].parse::<f64>(),
+        ) else {
             continue;
         };
         let p = [x * scale, y * scale];
@@ -175,23 +179,47 @@ pub fn read_library(text: &str) -> Library {
 /// Read an IDF board file with its library.
 pub fn read(board_text: &str, lib_text: Option<&str>) -> Result<Board, String> {
     let secs = sections(board_text);
-    let header = secs.iter().find(|s| s.name == "HEADER").ok_or("not an IDF file (no .HEADER)")?;
-    let scale = header.lines.get(1).and_then(|f| f.get(1)).map(|u| unit_scale(u)).unwrap_or(1.0);
-    let name = header.lines.get(1).and_then(|f| f.first()).cloned().unwrap_or_default();
-    let ver = header.lines.first().and_then(|f| f.get(1)).cloned().unwrap_or_default();
+    let header = secs
+        .iter()
+        .find(|s| s.name == "HEADER")
+        .ok_or("not an IDF file (no .HEADER)")?;
+    let scale = header
+        .lines
+        .get(1)
+        .and_then(|f| f.get(1))
+        .map(|u| unit_scale(u))
+        .unwrap_or(1.0);
+    let name = header
+        .lines
+        .get(1)
+        .and_then(|f| f.first())
+        .cloned()
+        .unwrap_or_default();
+    let ver = header
+        .lines
+        .first()
+        .and_then(|f| f.get(1))
+        .cloned()
+        .unwrap_or_default();
     let mut board = Board {
         format: format!("IDF {ver}"),
         name,
         ..Default::default()
     };
     if !ver.starts_with('3') && !ver.is_empty() {
-        board.warnings.push(format!("IDF version {ver}: read as 3.0"));
+        board
+            .warnings
+            .push(format!("IDF version {ver}: read as 3.0"));
     }
     let lib = lib_text.map(read_library).unwrap_or_default();
     for s in &secs {
         match s.name.as_str() {
             "BOARD_OUTLINE" | "PANEL_OUTLINE" if board.outline.is_empty() => {
-                let t = s.lines.first().and_then(|f| f.first()).and_then(|v| v.parse::<f64>().ok());
+                let t = s
+                    .lines
+                    .first()
+                    .and_then(|f| f.first())
+                    .and_then(|v| v.parse::<f64>().ok());
                 board.thickness_mm = t.map(|t| t * scale);
                 board.outline = loops(&s.lines[1..], scale);
             }
@@ -200,7 +228,11 @@ pub fn read(board_text: &str, lib_text: Option<&str>) -> Result<Board, String> {
                     if f.len() < 4 {
                         continue;
                     }
-                    let (Ok(d), Ok(x), Ok(y)) = (f[0].parse::<f64>(), f[1].parse::<f64>(), f[2].parse::<f64>()) else {
+                    let (Ok(d), Ok(x), Ok(y)) = (
+                        f[0].parse::<f64>(),
+                        f[1].parse::<f64>(),
+                        f[2].parse::<f64>(),
+                    ) else {
                         continue;
                     };
                     board.drills.push(Drill {
@@ -218,9 +250,15 @@ pub fn read(board_text: &str, lib_text: Option<&str>) -> Result<Board, String> {
                         continue;
                     }
                     let (geo, part, refdes) = (&a[0], &a[1], &a[2]);
-                    let num = |k: usize| b.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                    let side = if b[4].eq_ignore_ascii_case("BOTTOM") { Side::Bottom } else { Side::Top };
-                    let mut p = Placement::new(refdes, geo, num(0) * scale, num(1) * scale, num(3), side);
+                    let num =
+                        |k: usize| b.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                    let side = if b[4].eq_ignore_ascii_case("BOTTOM") {
+                        Side::Bottom
+                    } else {
+                        Side::Top
+                    };
+                    let mut p =
+                        Placement::new(refdes, geo, num(0) * scale, num(1) * scale, num(3), side);
                     p.part = part.clone();
                     match lib.get(&(geo.clone(), part.clone())) {
                         Some((bb, h)) => {
@@ -229,9 +267,9 @@ pub fn read(board_text: &str, lib_text: Option<&str>) -> Result<Board, String> {
                         }
                         None => {
                             if lib_text.is_some() {
-                                board
-                                    .warnings
-                                    .push(format!("{refdes}: '{geo}' / '{part}' not in the IDF library"));
+                                board.warnings.push(format!(
+                                    "{refdes}: '{geo}' / '{part}' not in the IDF library"
+                                ));
                             }
                         }
                     }
@@ -272,10 +310,15 @@ pub fn write(name: &str, outline: &[P2], thickness: f64, parts: &[IdfPart]) -> (
         emn += &format!("0 {:.4} {:.4} 0\n", p[0], p[1]);
     }
     emn += ".END_BOARD_OUTLINE\n.PLACEMENT\n";
-    let mut emp = format!(".HEADER\nLIBRARY_FILE 3.0 \"FerroTherm (Roany Romano)\" {date} 1\n.END_HEADER\n");
+    let mut emp =
+        format!(".HEADER\nLIBRARY_FILE 3.0 \"FerroTherm (Roany Romano)\" {date} 1\n.END_HEADER\n");
     let mut seen = std::collections::HashSet::new();
     for p in parts {
-        let geo = format!("{}_{:.2}x{:.2}x{:.2}", p.package, p.size[0], p.size[1], p.height).replace(' ', "_");
+        let geo = format!(
+            "{}_{:.2}x{:.2}x{:.2}",
+            p.package, p.size[0], p.size[1], p.height
+        )
+        .replace(' ', "_");
         emn += &format!(
             "\"{geo}\" \"{}\" {}\n{:.4} {:.4} 0 0 {} PLACED\n",
             p.package,
@@ -286,7 +329,10 @@ pub fn write(name: &str, outline: &[P2], thickness: f64, parts: &[IdfPart]) -> (
         );
         if seen.insert(geo.clone()) {
             let (w, h) = (0.5 * p.size[0], 0.5 * p.size[1]);
-            emp += &format!(".ELECTRICAL\n\"{geo}\" \"{}\" MM {:.4}\n", p.package, p.height);
+            emp += &format!(
+                ".ELECTRICAL\n\"{geo}\" \"{}\" MM {:.4}\n",
+                p.package, p.height
+            );
             for (x, y) in [(-w, -h), (w, -h), (w, h), (-w, h), (-w, -h)] {
                 emp += &format!("0 {x:.4} {y:.4} 0\n");
             }
@@ -356,7 +402,9 @@ PROP CAPACITANCE 100.0
         // area: 4000x3000 minus the corner cut (1000x1000 square minus a quarter circle r=1000)
         // plus nothing: the 90° arc bulges outwards from (4000,2000) to (3000,3000)
         let a0 = crate::geom::poly_area(&b.outline[0]).abs() / 0.0254f64.powi(2);
-        let exact = 4000.0 * 3000.0 - 1000.0 * 1000.0 + (std::f64::consts::PI / 4.0 - 0.5) * 1000.0 * 1000.0 + 0.5 * 1000.0 * 1000.0;
+        let exact = 4000.0 * 3000.0 - 1000.0 * 1000.0
+            + (std::f64::consts::PI / 4.0 - 0.5) * 1000.0 * 1000.0
+            + 0.5 * 1000.0 * 1000.0;
         assert!((a0 / exact - 1.0).abs() < 2e-3, "{a0} {exact}");
         let hole = crate::geom::poly_area(&b.outline[1]).abs() / 0.0254f64.powi(2);
         assert!((hole / (std::f64::consts::PI * 100.0 * 100.0) - 1.0).abs() < 5e-3);

@@ -162,15 +162,23 @@ fn eval(expr: &str, vars: &HashMap<usize, f64>) -> f64 {
                     while self.i < self.s.len() && self.s[self.i].is_ascii_digit() {
                         self.i += 1;
                     }
-                    let k: usize = std::str::from_utf8(&self.s[st..self.i]).unwrap().parse().unwrap_or(0);
+                    let k: usize = std::str::from_utf8(&self.s[st..self.i])
+                        .unwrap()
+                        .parse()
+                        .unwrap_or(0);
                     *self.v.get(&k).unwrap_or(&0.0)
                 }
                 _ => {
                     let st = self.i;
-                    while self.i < self.s.len() && (self.s[self.i].is_ascii_digit() || self.s[self.i] == b'.') {
+                    while self.i < self.s.len()
+                        && (self.s[self.i].is_ascii_digit() || self.s[self.i] == b'.')
+                    {
                         self.i += 1;
                     }
-                    std::str::from_utf8(&self.s[st..self.i]).unwrap().parse().unwrap_or(0.0)
+                    std::str::from_utf8(&self.s[st..self.i])
+                        .unwrap()
+                        .parse()
+                        .unwrap_or(0.0)
                 }
             }
         }
@@ -188,7 +196,14 @@ fn rot(p: P2, deg: f64) -> P2 {
 }
 
 /// Primitives of a flashed macro at `c`.
-fn flash_macro(body: &[String], params: &[f64], c: P2, dark: bool, out: &mut Vec<Prim>, warn: &mut Vec<String>) {
+fn flash_macro(
+    body: &[String],
+    params: &[f64],
+    c: P2,
+    dark: bool,
+    out: &mut Vec<Prim>,
+    warn: &mut Vec<String>,
+) {
     let mut vars: HashMap<usize, f64> = HashMap::new();
     for (i, p) in params.iter().enumerate() {
         vars.insert(i + 1, *p);
@@ -264,14 +279,19 @@ fn flash_macro(body: &[String], params: &[f64], c: P2, dark: bool, out: &mut Vec
                 if exp_on(f[1]) {
                     let (w, h, x, y, r) = (f[2], f[3], f[4], f[5], f[6]);
                     out.push(Prim::Poly {
-                        pts: vec![tr(x, y, r), tr(x + w, y, r), tr(x + w, y + h, r), tr(x, y + h, r)],
+                        pts: vec![
+                            tr(x, y, r),
+                            tr(x + w, y, r),
+                            tr(x + w, y + h, r),
+                            tr(x, y + h, r),
+                        ],
                         dark,
                     });
                 }
             }
             4 if f.len() >= 3 => {
                 let n = f[2] as usize;
-                if f.len() >= 3 + 2 * (n + 1) + 1 && exp_on(f[1]) {
+                if f.len() > 3 + 2 * (n + 1) && exp_on(f[1]) {
                     let r = f[3 + 2 * (n + 1)];
                     let pts = (0..=n).map(|k| tr(f[3 + 2 * k], f[4 + 2 * k], r)).collect();
                     out.push(Prim::Poly { pts, dark });
@@ -314,7 +334,9 @@ fn flash_macro(body: &[String], params: &[f64], c: P2, dark: bool, out: &mut Vec
             }
             _ => {
                 if !warn.iter().any(|w| w.contains("macro primitive")) {
-                    warn.push(format!("unsupported aperture macro primitive {code} ignored"));
+                    warn.push(format!(
+                        "unsupported aperture macro primitive {code} ignored"
+                    ));
                 }
             }
         }
@@ -361,10 +383,17 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
         }
         if c == b'%' {
             // extended command block
-            let end = text[i + 1..].find('%').map(|e| i + 1 + e).ok_or("unterminated % block")?;
+            let end = text[i + 1..]
+                .find('%')
+                .map(|e| i + 1 + e)
+                .ok_or("unterminated % block")?;
             let block = &text[i + 1..end];
             i = end + 1;
-            let words: Vec<&str> = block.split('*').map(|w| w.trim()).filter(|w| !w.is_empty()).collect();
+            let words: Vec<&str> = block
+                .split('*')
+                .map(|w| w.trim())
+                .filter(|w| !w.is_empty())
+                .collect();
             let Some(first) = words.first() else { continue };
             if let Some(rest) = first.strip_prefix("FS") {
                 // FSLAX46Y46
@@ -383,11 +412,18 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
             } else if let Some(rest) = first.strip_prefix("AD") {
                 // ADD10C,0.5X0.2
                 let rest = rest.trim_start_matches('D');
-                let n_end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+                let n_end = rest
+                    .find(|ch: char| !ch.is_ascii_digit())
+                    .unwrap_or(rest.len());
                 let code: u32 = rest[..n_end].parse().map_err(|_| "bad aperture code")?;
                 let def = &rest[n_end..];
                 let (name, params) = match def.split_once(',') {
-                    Some((n, p)) => (n, p.split('X').filter_map(|v| v.trim().parse::<f64>().ok()).collect::<Vec<_>>()),
+                    Some((n, p)) => (
+                        n,
+                        p.split('X')
+                            .filter_map(|v| v.trim().parse::<f64>().ok())
+                            .collect::<Vec<_>>(),
+                    ),
                     None => (def, vec![]),
                 };
                 let s = |k: usize| params.get(k).copied().unwrap_or(0.0) * scale;
@@ -395,20 +431,31 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
                     "C" => Aperture::Circle(s(0)),
                     "R" => Aperture::Rect(s(0), s(1)),
                     "O" => Aperture::Obround(s(0), s(1)),
-                    "P" => Aperture::Polygon(s(0), params.get(1).copied().unwrap_or(3.0) as usize, params.get(2).copied().unwrap_or(0.0)),
+                    "P" => Aperture::Polygon(
+                        s(0),
+                        params.get(1).copied().unwrap_or(3.0) as usize,
+                        params.get(2).copied().unwrap_or(0.0),
+                    ),
                     m => Aperture::Macro(m.to_string(), params.clone()),
                 };
                 apertures.insert(code, ap);
             } else if let Some(name) = first.strip_prefix("AM") {
-                macros.insert(name.to_string(), words[1..].iter().map(|w| w.to_string()).collect());
+                macros.insert(
+                    name.to_string(),
+                    words[1..].iter().map(|w| w.to_string()).collect(),
+                );
             } else if first.starts_with("LPD") {
                 dark = true;
             } else if first.starts_with("LPC") {
                 dark = false;
             } else if let Some(rest) = first.strip_prefix("TF.FileFunction,") {
                 out.file_function = Some(rest.to_string());
-            } else if first.starts_with("SR") && first.len() > 2 && !out.warnings.iter().any(|w| w.contains("step")) {
-                out.warnings.push("step-and-repeat (SR) blocks are not replicated".into());
+            } else if first.starts_with("SR")
+                && first.len() > 2
+                && !out.warnings.iter().any(|w| w.contains("step"))
+            {
+                out.warnings
+                    .push("step-and-repeat (SR) blocks are not replicated".into());
             }
             continue;
         }
@@ -425,7 +472,9 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
         let mut s = blk;
         // G codes
         while let Some(rest) = s.strip_prefix('G') {
-            let n_end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+            let n_end = rest
+                .find(|ch: char| !ch.is_ascii_digit())
+                .unwrap_or(rest.len());
             let g: u32 = rest[..n_end].parse().unwrap_or(0);
             match g {
                 1 => interp = 1,
@@ -473,7 +522,9 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
             let ch = b[k];
             k += 1;
             let st = k;
-            while k < b.len() && (b[k].is_ascii_digit() || b[k] == b'-' || b[k] == b'+' || b[k] == b'.') {
+            while k < b.len()
+                && (b[k].is_ascii_digit() || b[k] == b'-' || b[k] == b'+' || b[k] == b'.')
+            {
                 k += 1;
             }
             let num = &s[st..k];
@@ -538,7 +589,11 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
                         }
                     }
                     // keep the centre line for outline extraction
-                    if cur_line.last().map(|l| (l[0] - pos[0]).abs() + (l[1] - pos[1]).abs() > 1e-9).unwrap_or(true) {
+                    if cur_line
+                        .last()
+                        .map(|l| (l[0] - pos[0]).abs() + (l[1] - pos[1]).abs() > 1e-9)
+                        .unwrap_or(true)
+                    {
                         flush_line(&mut cur_line, &mut out);
                         cur_line.push(pos);
                     }
@@ -572,7 +627,11 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
                     }),
                     Some(Aperture::Obround(w, h)) => {
                         if (w - h).abs() < 1e-12 {
-                            out.prims.push(Prim::Disc { c: new, r: 0.5 * w, dark });
+                            out.prims.push(Prim::Disc {
+                                c: new,
+                                r: 0.5 * w,
+                                dark,
+                            });
                         } else if w > h {
                             out.prims.push(Prim::Seg {
                                 a: [new[0] - 0.5 * (w - h), new[1]],
@@ -624,13 +683,18 @@ pub fn parse_gerber(text: &str) -> Result<GerberLayer, String> {
                                         dark,
                                     },
                                     Prim::Poly { pts, dark } => Prim::Poly {
-                                        pts: pts.iter().map(|q| [new[0] + q[0] * scale, new[1] + q[1] * scale]).collect(),
+                                        pts: pts
+                                            .iter()
+                                            .map(|q| [new[0] + q[0] * scale, new[1] + q[1] * scale])
+                                            .collect(),
                                         dark,
                                     },
                                 });
                             }
                         }
-                        None => out.warnings.push(format!("undefined aperture macro '{name}'")),
+                        None => out
+                            .warnings
+                            .push(format!("undefined aperture macro '{name}'")),
                     },
                     None => {}
                 }
@@ -683,7 +747,10 @@ pub fn chain_segments(lines: &[Vec<P2>], tol: f64) -> Vec<Poly> {
 }
 
 /// Excellon drill file → drills (mm). `plated_default` for files without attributes.
-pub fn parse_excellon(text: &str, plated_default: bool) -> Result<(Vec<Drill>, Vec<String>), String> {
+pub fn parse_excellon(
+    text: &str,
+    plated_default: bool,
+) -> Result<(Vec<Drill>, Vec<String>), String> {
     let mut tools: HashMap<u32, (f64, bool)> = HashMap::new();
     let mut metric = true;
     let mut fmt_dec = 3u32; // implied decimals
@@ -737,7 +804,9 @@ pub fn parse_excellon(text: &str, plated_default: bool) -> Result<(Vec<Drill>, V
         }
         let unit = if metric { 1.0 } else { 25.4 };
         if let Some(rest) = line.strip_prefix('T') {
-            let n_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            let n_end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
             let t: u32 = rest[..n_end].parse().unwrap_or(0);
             if let Some(cpos) = rest.find('C') {
                 let d: f64 = rest[cpos + 1..]
@@ -758,14 +827,19 @@ pub fn parse_excellon(text: &str, plated_default: bool) -> Result<(Vec<Drill>, V
                 warnings.push("routed slots (G85) are treated as two holes".into());
             }
             let parse = |s: &str| -> Option<f64> {
-                let num: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+').collect();
+                let num: String = s
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')
+                    .collect();
                 if num.is_empty() {
                     return None;
                 }
                 if num.contains('.') {
                     num.parse::<f64>().ok().map(|v| v * unit)
                 } else {
-                    num.parse::<i64>().ok().map(|v| v as f64 / 10f64.powi(fmt_dec as i32) * unit)
+                    num.parse::<i64>()
+                        .ok()
+                        .map(|v| v as f64 / 10f64.powi(fmt_dec as i32) * unit)
                 }
             };
             for part in line.split('G').next().into_iter() {
@@ -781,7 +855,12 @@ pub fn parse_excellon(text: &str, plated_default: bool) -> Result<(Vec<Drill>, V
                 }
             }
             if let Some((d, plated)) = cur {
-                drills.push(Drill { x, y, d_mm: d, plated });
+                drills.push(Drill {
+                    x,
+                    y,
+                    d_mm: d,
+                    plated,
+                });
             }
         }
     }
@@ -871,18 +950,27 @@ pub fn read_set(files: &[(String, String)]) -> Result<Board, String> {
         }
         let g = parse_gerber(text).map_err(|e| format!("{name}: {e}"))?;
         // the job file's function wins, then X2 attributes, then extensions
-        let base = std::path::Path::new(name).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let base = std::path::Path::new(name)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         let ff = job
             .as_ref()
-            .and_then(|j| j.files.iter().find(|(p, _)| p.eq_ignore_ascii_case(&base)).map(|x| x.1.clone()))
+            .and_then(|j| {
+                j.files
+                    .iter()
+                    .find(|(p, _)| p.eq_ignore_ascii_case(&base))
+                    .map(|x| x.1.clone())
+            })
             .or_else(|| g.file_function.clone())
             .or_else(|| match ext {
                 "gtl" | "cmp" | "top" => Some("Copper,L1,Top".into()),
                 "gbl" | "sol" | "bot" => Some("Copper,L99,Bot".into()),
                 "gko" | "gm1" | "gml" | "oln" => Some("Profile,NP".into()),
-                e if e.starts_with('g') && e[1..].parse::<u32>().is_ok() => {
-                    Some(format!("Copper,L{},Inr", e[1..].parse::<u32>().unwrap() + 1))
-                }
+                e if e.starts_with('g') && e[1..].parse::<u32>().is_ok() => Some(format!(
+                    "Copper,L{},Inr",
+                    e[1..].parse::<u32>().unwrap() + 1
+                )),
                 _ => None,
             });
         for w in &g.warnings {
@@ -902,10 +990,14 @@ pub fn read_set(files: &[(String, String)]) -> Result<Board, String> {
     if let Some(p) = &profile {
         board.outline = p.contours();
         if board.outline.is_empty() {
-            board.warnings.push("the profile layer has no closed contour; using the copper extent".into());
+            board
+                .warnings
+                .push("the profile layer has no closed contour; using the copper extent".into());
         }
     } else {
-        board.warnings.push("no board profile (outline) layer found; using the copper extent".into());
+        board
+            .warnings
+            .push("no board profile (outline) layer found; using the copper extent".into());
     }
     if board.outline.is_empty() {
         let mut pts = Vec::new();
