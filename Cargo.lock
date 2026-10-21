@@ -1470,7 +1470,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ferrotherm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotherm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rayon",
  "serde",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotherm-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "ferrotherm-core",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotherm-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ferrotherm-core",
  "flate2",
