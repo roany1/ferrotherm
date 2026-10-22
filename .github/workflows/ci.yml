@@ -33,8 +33,13 @@ jobs:
           status=${PIPESTATUS[0]}
           if [ "$status" != "0" ]; then
             # surface the first errors as an annotation (readable without the log)
-            msg=$(grep -E -A8 "^error" clippy.log | head -60 | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
-            echo "::error title=clippy::$msg"
+            n=0
+            grep -E -B2 -A10 "error" clippy.log | tr -d '\r' | head -120 > clippy_err.txt || true
+            [ -s clippy_err.txt ] || tail -n 40 clippy.log | tr -d '\r' > clippy_err.txt
+            while IFS= read -r line; do
+              n=$((n+1)); [ $n -gt 9 ] && break
+              echo "::error title=clippy $n::$line"
+            done < <(awk 'NR%12==1{if(b)print b; b=$0; next}{b=b" ¦ "$0}END{print b}' clippy_err.txt)
           fi
           exit $status
       - name: Tests (incl. analytical validation)
