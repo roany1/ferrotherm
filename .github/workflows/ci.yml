@@ -18,8 +18,10 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # pinned: newer releases add clippy lints, and CI runs clippy with -D warnings
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97.0"
           components: clippy, rustfmt
       - name: Format
         run: cargo fmt --all -- --check
