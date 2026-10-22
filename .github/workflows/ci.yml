@@ -27,6 +27,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         shell: bash
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           set +e
           cargo clippy --all-targets --release -- -D warnings 2>&1 | tee clippy.log
@@ -34,7 +36,7 @@ jobs:
           if [ "$status" != "0" ]; then
             # surface the first errors as an annotation (readable without the log)
             n=0
-            grep -E -B2 -A10 "error" clippy.log | tr -d '\r' | head -120 > clippy_err.txt || true
+            grep -E -A10 "^(error|warning)(\[|:)" clippy.log | grep -v "^ *Compiling\|^ *Checking" | tr -d '\r' | head -120 > clippy_err.txt || true
             [ -s clippy_err.txt ] || tail -n 40 clippy.log | tr -d '\r' > clippy_err.txt
             while IFS= read -r line; do
               n=$((n+1)); [ $n -gt 9 ] && break
