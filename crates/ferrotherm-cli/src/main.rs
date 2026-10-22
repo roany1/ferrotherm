@@ -25,6 +25,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// parsed once at start-up: the size of the Import variant does not matter
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Solve a case and write results (VTK for ParaView, Markdown/JSON report, junction CSV).
     Run {
