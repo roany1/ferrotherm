@@ -23,6 +23,10 @@ limitations below.
 > OpenCascade), STL, IDF 3.0, KiCad, Gerber+Excellon, IPC-2581 e ODB++;
 > esporta STEP, STL, IDF, VTK (ParaView) e CSV. Interfaccia grafica desktop
 > per Windows/macOS/Linux e riga di comando.
+>
+> 📘 **[Guida completa in italiano](docs/guida-italiano.md)** — installazione e
+> tutorial passo-passo (scheda in contenitore sigillato, apparato ventilato
+> con CFD, import STEP).
 
 ![FerroTherm desktop app: air speed on a section plane with velocity arrows, forced-air chassis example](docs/gui_flow.png)
 
