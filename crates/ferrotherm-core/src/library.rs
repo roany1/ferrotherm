@@ -250,6 +250,15 @@ impl Library {
         self.validate()
     }
 
+    /// Add (or replace by id) materials, e.g. those defined inside a case.
+    pub fn add_materials(&mut self, materials: &[Material]) -> Result<()> {
+        if materials.is_empty() {
+            return Ok(());
+        }
+        upsert(&mut self.materials, materials.to_vec(), |x| &x.id);
+        self.validate()
+    }
+
     pub fn merge_file(&mut self, path: &Path) -> Result<()> {
         let text = std::fs::read_to_string(path).map_err(|source| Error::Io {
             path: path.display().to_string(),

@@ -290,6 +290,8 @@ pub struct Fragment {
     pub min: [f64; 3],
     pub max: [f64; 3],
     pub notes: Vec<String>,
+    /// Materials the blocks refer to that are not in the library.
+    pub materials: Vec<ferrotherm_core::library::Material>,
 }
 
 /// Rough package height from the package/footprint name, mm. Used only when

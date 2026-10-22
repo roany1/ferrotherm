@@ -215,6 +215,13 @@ conductivity may depend on temperature (`k_table` in a library material).
 | `dt_s`, `end_s` | Time step and end time (implicit Euler) |
 | `output_every_s` | Write a field every N s (default: start and end only) |
 
+## `[[materials]]` — materials inside the case
+
+Same fields as a library material (`id`, `name`, `k`, `density`, `cp`,
+optional `viscosity`, `beta`, `k_table`). They extend or replace library
+entries with the same id; models imported from other tools carry their
+materials this way.
+
 ## Extra libraries
 
 `libraries = ["my_materials.json"]` at the top level (paths relative to the

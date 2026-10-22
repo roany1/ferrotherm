@@ -7,6 +7,7 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 pub mod archive;
+pub mod celsius;
 pub mod ecad;
 pub mod export;
 pub mod geom;

@@ -288,7 +288,28 @@ per la meccanica.
 
 ---
 
-## 7. Componenti DELPHI multi-nodo
+## 7. Importare un modello Cadence Celsius EC Solver
+
+*File → Import CAD…* e scegli il file `.equipment` (oppure
+`ferrotherm import modello.equipment -o modello.toml`). Vengono letti:
+contenitore e pareti, ambiente (temperatura, coefficiente di scambio
+esterno, irraggiamento), fluido, impostazioni del solutore (flusso,
+gravità, turbolenza, iterazioni), materiali con i loro valori, schede
+multistrato, componenti 2R (θJC/θJB) o a blocco con la potenza, dissipatori
+estrusi, gap pad, ostacoli (parallelepipedi e solidi CAD, voxelizzati) e
+gruppi. Gli oggetti segnati "non installati" in Celsius vengono saltati.
+
+- **Open as new model** sostituisce il modello corrente; **Add to current
+  model** aggiunge solo oggetti e materiali.
+- Celsius ha l'asse Y verso l'alto; FerroTherm usa x = X, y = profondità − Z,
+  z = Y. Controlla un paio di posizioni rispetto a Celsius.
+- Gli oggetti non ancora supportati (ventole, vent, cold plate, sensori…)
+  sono elencati negli avvisi della finestra di import.
+- La turbolenza k-ε di Celsius diventa LVEL (segnalato).
+- Il formato è stato ricostruito da file salvati con le versioni 17.44 e
+  2024.36: non è una specifica ufficiale.
+
+## 8. Componenti DELPHI multi-nodo
 
 Seleziona un componente e, in fondo al pannello, scegli **Multi-node
 (DELPHI)**. Viene creata la topologia tipica (giunzione, top interno/esterno,
@@ -300,7 +321,7 @@ il calore uscente da ogni superficie.
 
 ---
 
-## 8. Esportare
+## 9. Esportare
 
 - **File → Export geometry:** STEP (solidi AP214), STL oppure IDF 3.0 (board
   `.emn` + libreria `.emp`) per riportare il modello nel CAD meccanico o
@@ -312,7 +333,7 @@ il calore uscente da ogni superficie.
 
 ---
 
-## 9. Riga di comando
+## 10. Riga di comando
 
 Utile per automatizzare o per i calcoli lunghi. Su Windows il programma è
 `ferrotherm.exe`.
@@ -337,7 +358,7 @@ con Git e aprire indifferentemente dall'interfaccia o dalla riga di comando.
 
 ---
 
-## 10. Librerie
+## 11. Librerie
 
 *Libraries → Browse libraries* mostra materiali, finiture, package,
 ambienti e regole di derating, ciascuno con la sua fonte (ASM Handbook,
@@ -356,7 +377,7 @@ Una voce con un `id` già esistente sostituisce quella predefinita.
 
 ---
 
-## 11. Consigli e limiti
+## 12. Consigli e limiti
 
 - **Studio di griglia:** confronta sempre almeno due griglie.
 - **Bilancio energetico:** potenza entrante e calore uscente devono

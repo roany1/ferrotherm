@@ -69,7 +69,8 @@ impl Simulation {
         Self::with_library(case, library)
     }
 
-    pub fn with_library(case: Case, library: Library) -> Result<Simulation> {
+    pub fn with_library(case: Case, mut library: Library) -> Result<Simulation> {
+        library.add_materials(&case.materials)?;
         let model = Model::build(&case, &library)?;
         let s2s = case
             .radiation

@@ -30,6 +30,7 @@ pub enum Source {
     Gerber,
     Ipc2581,
     Odbpp,
+    Celsius,
 }
 
 impl Source {
@@ -42,11 +43,12 @@ impl Source {
             Source::Gerber => "Gerber/Excellon",
             Source::Ipc2581 => "IPC-2581",
             Source::Odbpp => "ODB++",
+            Source::Celsius => "Celsius EC Solver",
         }
     }
     /// True for ECAD formats (board + placements).
     pub fn is_ecad(&self) -> bool {
-        !matches!(self, Source::Step | Source::Stl)
+        !matches!(self, Source::Step | Source::Stl | Source::Celsius)
     }
 }
 
@@ -59,6 +61,7 @@ pub const FILTERS: &[(&str, &[&str])] = &[
             "stp",
             "p21",
             "stl",
+            "equipment",
             "emn",
             "brd",
             "bdf",
@@ -78,6 +81,7 @@ pub const FILTERS: &[(&str, &[&str])] = &[
             "zip",
         ],
     ),
+    ("Celsius EC Solver model", &["equipment"]),
     ("STEP (MCAD)", &["step", "stp", "p21"]),
     ("STL", &["stl"]),
     ("IDF 3.0", &["emn", "brd", "bdf", "idb"]),
@@ -93,6 +97,8 @@ pub const FILTERS: &[(&str, &[&str])] = &[
 pub enum Imported {
     Board(Board),
     Mcad(StepModel),
+    /// A complete thermal model from another solver.
+    Project(Box<crate::celsius::CelsiusModel>),
 }
 
 fn lower(p: &Path) -> String {
@@ -116,6 +122,9 @@ fn is_ipc(text: &str) -> bool {
 /// Which format a set of files (folder or archive) holds.
 pub fn detect_files(files: &Files) -> Option<Source> {
     let names: Vec<String> = files.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+    if names.iter().any(|n| n.ends_with(".equipment")) {
+        return Some(Source::Celsius);
+    }
     if names.iter().any(|n| n.ends_with("matrix/matrix")) {
         return Some(Source::Odbpp);
     }
@@ -235,6 +244,14 @@ pub fn read_files(src: Source, files: Files, tolerance_mm: f64) -> Result<Import
                 .ok_or("no STEP file")?;
             step::read(&text(d), tolerance_mm).map(Imported::Mcad)
         }
+        Source::Celsius => {
+            let (_, d) = files
+                .iter()
+                .filter(|(n, _)| n.to_ascii_lowercase().ends_with(".equipment"))
+                .max_by_key(|(_, d)| d.len())
+                .ok_or("no Celsius model")?;
+            crate::celsius::read(d).map(|m| Imported::Project(Box::new(m)))
+        }
         Source::Stl => {
             let (n, d) = files
                 .iter()
@@ -279,6 +296,7 @@ fn import_path_raw(path: &Path, tolerance_mm: f64) -> Result<(Source, Imported),
         match e.as_str() {
             "step" | "stp" | "p21" => return single(Source::Step),
             "stl" => return single(Source::Stl),
+            "equipment" => return single(Source::Celsius),
             "kicad_pcb" => return single(Source::KiCad),
             "xml" | "cvg" => return single(Source::Ipc2581),
             "emn" | "brd" | "bdf" | "idb" => {
@@ -517,6 +535,19 @@ pub fn merge_into_case(
         c.name = n;
         case.components.push(c);
     }
+    let mut added = 0;
+    for m in fr.materials {
+        match case.materials.iter_mut().find(|x| x.id == m.id) {
+            Some(x) => *x = m,
+            None => {
+                case.materials.push(m);
+                added += 1;
+            }
+        }
+    }
+    if added > 0 {
+        notes.push(format!("{added} materials added to the model"));
+    }
     if renamed > 0 {
         notes.push(format!(
             "{renamed} names already in use were given a ~N suffix"
@@ -548,5 +579,30 @@ pub fn merge_into_case(
 pub fn board_fragment(board: &mut Board, opt: &ecad::ToCaseOptions) -> Fragment {
     let mut fr = ecad::to_fragment(board, opt);
     fr.notes.extend(board.warnings.iter().cloned());
+    fr
+}
+
+/// Geometry (blocks, components, materials) of a complete imported model, to
+/// add to another case. `mode` turns CAD solids into blocks.
+pub fn project_fragment(
+    m: &crate::celsius::CelsiusModel,
+    mode: BlockMode,
+    prefix: &str,
+) -> Fragment {
+    let case = m.to_case(mode);
+    let mut fr = Fragment {
+        blocks: case.blocks,
+        components: case.components,
+        materials: case.materials,
+        notes: m.warnings.clone(),
+        ..Default::default()
+    };
+    for b in &mut fr.blocks {
+        b.name = format!("{prefix}{}", b.name);
+    }
+    for c in &mut fr.components {
+        c.name = format!("{prefix}{}", c.name);
+    }
+    extent(&mut fr);
     fr
 }

@@ -154,6 +154,7 @@ pub fn load_library(case: &Case, base_dir: &Path) -> Result<Library> {
     for f in &case.libraries {
         lib.merge_file(&base_dir.join(f))?;
     }
+    lib.add_materials(&case.materials)?;
     Ok(lib)
 }
 

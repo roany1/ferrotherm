@@ -252,6 +252,23 @@ fn cad_info(file: &Path) -> Result<()> {
                 println!("warning: {w}");
             }
         }
+        Imported::Project(m) => {
+            println!("{}", m.summary());
+            let c = &m.case;
+            println!(
+                "domain {:.1} × {:.1} × {:.1} mm, {} blocks, {} components, {} materials, flow {}",
+                c.domain.max[0] - c.domain.min[0],
+                c.domain.max[1] - c.domain.min[1],
+                c.domain.max[2] - c.domain.min[2],
+                c.blocks.len(),
+                c.components.len(),
+                c.materials.len(),
+                if c.flow.is_some() { "on" } else { "off" }
+            );
+            for w in &m.warnings {
+                println!("warning: {w}");
+            }
+        }
     }
     Ok(())
 }
@@ -460,7 +477,31 @@ fn main() -> Result<()> {
                 Some(_) => anyhow::bail!("--origin needs three values: x,y,z"),
                 None => None,
             };
+            if let Imported::Project(m) = &imp {
+                if into.is_none() {
+                    // a complete model: becomes the case as it is
+                    let case = m.to_case(parse_shape(&shape)?);
+                    let out = out.unwrap_or_else(|| file.with_extension("toml"));
+                    if out.exists() && out.extension().and_then(|e| e.to_str()) != Some("toml") {
+                        anyhow::bail!("refusing to overwrite {}", out.display());
+                    }
+                    std::fs::write(&out, case.to_toml()?)?;
+                    println!(
+                        "{}: {} blocks, {} components, {} materials -> {}",
+                        src.label(),
+                        case.blocks.len(),
+                        case.components.len(),
+                        case.materials.len(),
+                        out.display()
+                    );
+                    for w in &m.warnings {
+                        println!("note: {w}");
+                    }
+                    return Ok(());
+                }
+            }
             let fr = match imp {
+                Imported::Project(m) => import::project_fragment(&m, parse_shape(&shape)?, &prefix),
                 Imported::Board(mut b) => {
                     if let Some(p) = &power {
                         let n = ferrotherm_io::ecad::apply_power_csv(

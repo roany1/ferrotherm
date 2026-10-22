@@ -1036,9 +1036,22 @@ pub fn body_boxes(b: &StepBody, mode: BlockMode) -> Vec<(V3, V3)> {
         }
         BlockMode::Voxels(r) => r.max(1e-3),
     };
-    let n: [usize; 3] =
-        [0, 1, 2].map(|a| (((b.max[a] - b.min[a]) / res).ceil() as usize).clamp(1, 400));
-    let h: [f64; 3] = [0, 1, 2].map(|a| (b.max[a] - b.min[a]) / n[a] as f64);
+    // voxels on a global lattice (multiples of the voxel size), so that
+    // bodies voxelised separately share their grid planes; at most 400 per axis
+    let mut h = [res; 3];
+    let mut o = [0.0; 3];
+    let mut n = [1usize; 3];
+    for a in 0..3 {
+        let m = ((b.max[a] - b.min[a]) / res / 400.0).ceil().max(1.0);
+        h[a] = res * m;
+        o[a] = (b.min[a] / h[a]).floor() * h[a];
+        n[a] = (((b.max[a] - o[a]) / h[a] - 1e-9).ceil() as usize).max(1);
+    }
+    let b = &StepBody {
+        min: o,
+        max: [0, 1, 2].map(|a| o[a] + n[a] as f64 * h[a]),
+        ..b.clone()
+    };
     // bin triangles by xy footprint
     let mut bins: Vec<Vec<u32>> = vec![Vec::new(); n[0] * n[1]];
     for (k, t) in b.tris.iter().enumerate() {

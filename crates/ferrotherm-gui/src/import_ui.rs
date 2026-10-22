@@ -22,12 +22,15 @@ enum State {
     Loading(Receiver<Result<(Source, Imported), String>>),
     Board(Source, Box<Board>, BoardSummary),
     Mcad(Source, Box<StepModel>),
+    Project(Box<ferrotherm_io::celsius::CelsiusModel>),
     Failed(String),
 }
 
 pub enum Action {
     /// Add to the case; `bool` = grow the domain to fit.
     Add(Fragment, bool),
+    /// Replace the current model with this one.
+    Open(Box<ferrotherm_core::Case>),
     Close,
 }
 
@@ -122,6 +125,15 @@ impl ImportDialog {
                         State::Board(src, Box::new(b), s)
                     }
                     Ok((src, Imported::Mcad(m))) => State::Mcad(src, Box::new(m)),
+                    Ok((_, Imported::Project(m))) => {
+                        if !m.cad.is_empty() {
+                            self.voxel = true;
+                            let d = &m.case.domain;
+                            let big = (0..3).map(|a| d.max[a] - d.min[a]).fold(0.0, f64::max);
+                            self.voxel_mm = (big / 120.0).clamp(1.0, 5.0).round();
+                        }
+                        State::Project(m)
+                    }
                     Err(e) => State::Failed(e),
                 };
             }
@@ -195,6 +207,7 @@ impl ImportDialog {
             }
             State::Board(..) => self.board_ui(ui, domain_min),
             State::Mcad(..) => self.mcad_ui(ui, lib, domain_min),
+            State::Project(..) => self.project_ui(ui),
         }
     }
 
@@ -339,6 +352,91 @@ impl ImportDialog {
                     prefix: self.prefix.clone(),
                 };
                 out = Some(Action::Add(import::board_fragment(board, &opt), self.fit));
+            }
+            if ui.button("Cancel").clicked() {
+                out = Some(Action::Close);
+            }
+        });
+        out
+    }
+
+    fn project_ui(&mut self, ui: &mut Ui) -> Option<Action> {
+        let State::Project(m) = &self.state else {
+            return None;
+        };
+        let c = &m.case;
+        ui.label(RichText::new(m.summary()).strong());
+        ui.label(format!(
+            "Domain {:.1} × {:.1} × {:.1} mm · {} blocks · {} components · {} materials · air flow {}",
+            c.domain.max[0] - c.domain.min[0],
+            c.domain.max[1] - c.domain.min[1],
+            c.domain.max[2] - c.domain.min[2],
+            c.blocks.len(),
+            c.components.len(),
+            c.materials.len(),
+            if c.flow.is_some() { "on" } else { "off" }
+        ));
+        let p: f64 = c.blocks.iter().map(|b| b.power_w).sum::<f64>()
+            + c.components.iter().map(|x| x.power_w).sum::<f64>()
+            + m.cad.iter().map(|x| x.power_w).sum::<f64>();
+        ui.label(format!("Total power {p:.3} W"));
+        egui::ScrollArea::vertical()
+            .max_height(140.0)
+            .show(ui, |ui| {
+                for w in &m.warnings {
+                    ui.colored_label(WARN, RichText::new(w).small());
+                }
+            });
+        if !m.cad.is_empty() {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(format!("{} CAD solids:", m.cad.len()));
+                ui.selectable_value(&mut self.voxel, false, "Bounding box");
+                ui.selectable_value(&mut self.voxel, true, "Voxelised");
+                if self.voxel {
+                    ui.add(
+                        DragValue::new(&mut self.voxel_mm)
+                            .speed(0.05)
+                            .range(0.2..=50.0)
+                            .suffix(" mm"),
+                    )
+                    .on_hover_text("Smaller voxels follow the shape better but make a finer grid");
+                }
+            });
+        }
+        ui.label(
+            RichText::new(
+                "Values come straight from the Celsius model (materials, θJC/θJB, power, environment). \
+                 Compare a few positions with Celsius before trusting the import.",
+            )
+            .weak()
+            .small(),
+        );
+        let mode = if self.voxel {
+            BlockMode::Voxels(self.voxel_mm)
+        } else {
+            BlockMode::BoundingBox
+        };
+        let mut out = None;
+        ui.horizontal(|ui| {
+            if ui
+                .button(RichText::new("Open as new model").strong())
+                .on_hover_text(
+                    "Replaces the current model (domain, boundaries, flow settings, objects)",
+                )
+                .clicked()
+            {
+                out = Some(Action::Open(Box::new(m.to_case(mode))));
+            }
+            if ui
+                .button("Add to current model")
+                .on_hover_text("Adds only the objects and materials")
+                .clicked()
+            {
+                out = Some(Action::Add(
+                    ferrotherm_io::import::project_fragment(m, mode, &self.prefix),
+                    self.fit,
+                ));
             }
             if ui.button("Cancel").clicked() {
                 out = Some(Action::Close);

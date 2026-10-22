@@ -49,6 +49,10 @@ pub struct Case {
     /// Extra JSON library files, relative to the case file.
     #[serde(default)]
     pub libraries: Vec<String>,
+    /// Materials defined in the case itself (e.g. imported from another
+    /// tool); they extend or replace library entries with the same id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<crate::library::Material>,
 }
 
 // ------------------------------------------------------------------ flow

@@ -2859,11 +2859,23 @@ impl FerroApp {
                     let name = dlg.path.display().to_string();
                     self.import = None;
                     self.hidden.resize(self.case.blocks.len(), false);
+                    if let Err(e) = self.library.add_materials(&self.case.materials) {
+                        self.error(format!("Imported materials: {e}"));
+                    }
                     self.info(format!("Imported {name}: {nb} blocks, {nc} components"));
                     for n in notes {
                         self.warn(n);
                     }
                     self.vp.needs_fit = true;
+                }
+                Some(import_ui::Action::Open(case)) => {
+                    let name = dlg.path.display().to_string();
+                    self.import = None;
+                    self.set_case(*case, None);
+                    self.dirty = true;
+                    self.info(format!(
+                        "Opened {name} as a new model: save it to keep it (File > Save as)"
+                    ));
                 }
                 Some(import_ui::Action::Close) => self.import = None,
                 None => {}
