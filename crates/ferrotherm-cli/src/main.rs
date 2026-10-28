@@ -101,9 +101,11 @@ enum Cmd {
         /// ECAD: ignore parts with a smaller footprint, mm²
         #[arg(long, default_value_t = 4.0)]
         min_area: f64,
-        /// MCAD: "box" (bounding box per body) or "voxel:<mm>" (voxelised shape)
-        #[arg(long, default_value = "box")]
-        shape: String,
+        /// MCAD: "box" (bounding box per body) or "voxel:<mm>" (voxelised shape).
+        /// Default: "box" for STEP/STL; for a Celsius EC Solver model with CAD
+        /// solids, voxels of about 1/120 of the model size (as the desktop app)
+        #[arg(long)]
+        shape: Option<String>,
         /// MCAD: material of the imported bodies
         #[arg(long, default_value = "al-6061-t6")]
         material: String,
@@ -320,8 +322,17 @@ fn main() -> Result<()> {
             if !quiet {
                 eprintln!("results written to {}", dir.display());
             }
+            let not_converged = res.result.flow.as_ref().is_some_and(|f| !f.converged);
+            if not_converged {
+                eprintln!(
+                    "warning: the flow solution did NOT converge: results are not reliable (see the Flow section of the report)"
+                );
+            }
             if res.report.components.iter().any(|c| c.pass == Some(false)) {
                 std::process::exit(2);
+            }
+            if not_converged {
+                std::process::exit(3);
             }
         }
         Cmd::Check { case } => {
@@ -480,7 +491,11 @@ fn main() -> Result<()> {
             if let Imported::Project(m) = &imp {
                 if into.is_none() {
                     // a complete model: becomes the case as it is
-                    let case = m.to_case(parse_shape(&shape)?);
+                    let mode = match &shape {
+                        Some(sh) => parse_shape(sh)?,
+                        None => m.default_cad_mode(),
+                    };
+                    let case = m.to_case(mode);
                     let out = out.unwrap_or_else(|| file.with_extension("toml"));
                     if out.exists() && out.extension().and_then(|e| e.to_str()) != Some("toml") {
                         anyhow::bail!("refusing to overwrite {}", out.display());
@@ -501,7 +516,13 @@ fn main() -> Result<()> {
                 }
             }
             let fr = match imp {
-                Imported::Project(m) => import::project_fragment(&m, parse_shape(&shape)?, &prefix),
+                Imported::Project(m) => {
+                    let mode = match &shape {
+                        Some(sh) => parse_shape(sh)?,
+                        None => m.default_cad_mode(),
+                    };
+                    import::project_fragment(&m, mode, &prefix)
+                }
                 Imported::Board(mut b) => {
                     if let Some(p) = &power {
                         let n = ferrotherm_io::ecad::apply_power_csv(
@@ -527,7 +548,7 @@ fn main() -> Result<()> {
                     import::board_fragment(&mut b, &opt)
                 }
                 Imported::Mcad(m) => {
-                    let mode = parse_shape(&shape)?;
+                    let mode = parse_shape(shape.as_deref().unwrap_or("box"))?;
                     for w in &m.warnings {
                         eprintln!("warning: {w}");
                     }

@@ -41,7 +41,7 @@ limitations below.
 | Components | 2-resistor (θJC/θJB) and DELPHI-style multi-node compact models (top/bottom inner/outer, sides, leads); Tj, case and board temperatures, heat split per surface; PASS/FAIL against SD-18 derating or a user limit |
 | PCB | Layered effective-conductivity stack; from ECAD data the board becomes a map of tiles, each with the copper coverage of every layer and the plated-via fraction measured from the artwork |
 | Solvers | BiCGSTAB/PCG with additive-correction multigrid; relative residuals plus a "temperatures settled" convergence check on junctions and monitor points; exact global energy balance reported |
-| CAD import | STEP AP203/214/242 (B-rep imported and tessellated by OpenCascade 8, compiled to WebAssembly, with assembly names and placements), STL, IDF 3.0, KiCad `.kicad_pcb` (v5–v9), Gerber X2/RS-274X + Excellon (+ job file), IPC-2581, ODB++ (folder or `.tgz/.zip`, `.Z` files), power list CSV; complete **Cadence Celsius EC Solver** models (`.equipment`: chassis, environment, materials, PCBs, 2R components, heat sinks, obstructions and CAD solids) |
+| CAD import | STEP AP203/214/242 (B-rep imported and tessellated by OpenCascade 8, compiled to WebAssembly, with assembly names and placements), STL, IDF 3.0, KiCad `.kicad_pcb` (v5–v9), Gerber X2/RS-274X + Excellon (+ job file), IPC-2581, ODB++ (folder or `.tgz/.zip`, `.Z` files), power list CSV; complete **Cadence Celsius EC Solver** models (`.equipment`: chassis, environment, materials with surface emissivity, radiation settings, PCBs in any 90° orientation with their parts, 2R components, heat sinks, obstructions and CAD solids) |
 | Export | STEP (AP214 solids), STL, IDF 3.0 board + library, VTK (`.vtr/.pvd`: temperature, velocity, speed, pressure, material, power density), `report.md/json`, `components.csv`, `blocks.csv`, `junctions.csv` |
 | Libraries | 39 materials, finishes, 19 packages (incl. MIL-HDBK-217F θJC defaults), MIL-STD-810H environments, SD-18 derating rules — every entry with its source; extendable with your own JSON |
 | Desktop app | Model tree and property editors for every object (fans, grilles, heat sinks, monitors, DELPHI networks, flow and radiation settings), 3D view with X-ray and section planes, temperature / air-speed / pressure maps with velocity arrows, live residual plot, CAD import dialog with board preview, undo/redo |
@@ -97,7 +97,11 @@ $F pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
 ```
 
 `ferrotherm run` exits with code **2** when a component exceeds its Tj
-limit, so it can gate a CI pipeline. Open the `.vtr` (steady) or `.pvd`
+limit and with code **3** when the flow solution did not converge (2 wins when
+both apply; the warning is printed anyway), so it can
+gate a CI pipeline. A steady flow run stops early only when the key
+temperatures have settled *and* the mass and energy residuals are below ten
+times `tolerance`. Open the `.vtr` (steady) or `.pvd`
 (transient) file in [ParaView](https://www.paraview.org).
 
 ## Case file
@@ -124,6 +128,7 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | DELPHI network reduced to 2R | 2R model | Tj within 0.03 K |
 | Real KiCad board vs its own Gerber export | Same board, two readers | copper coverage within 0.04 %; cross-checked with gerbv |
 | Real KiCad STEP assembly (55 parts) | Pick-and-place file | 54/54 placed parts at their position |
+| Celsius EC Solver model with vertical boards (2024.36) | STEP export of the same model made by Celsius | boards, parts and CAD obstructions within 1e-3 mm |
 | FerroTherm STEP/IDF/STL export | Re-import (OpenCascade for STEP) | boxes recovered within 1e-4 mm |
 | KiCad board → case → solve | Power in = heat out | imbalance < 1e-6 % |
 
@@ -144,6 +149,12 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 - **IPC-2581 and ODB++** readers are tested on files structured like KiCad's
   exporters and on synthetic samples, not yet on Cadence Allegro / Mentor
   Xpedition / Altium production exports. Please report files that fail.
+- **Celsius EC Solver import:** single-axis rotations of boards and
+  obstructions (any multiple of 90°), part placement on rotated boards and
+  CAD solids inside groups are checked against Celsius' own STEP export.
+  Rotations combining several axes, tilted boards and parts rotated on the
+  board use conventions not verified yet and are flagged; objects that land
+  outside the chassis are listed in the import warnings.
 - **IDF** is imported with board outline, placements and part outlines/heights
   (no copper): combine with Gerber/ODB++ for the copper map.
 - Missing part heights are guessed from the package name and listed as a

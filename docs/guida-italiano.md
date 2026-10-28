@@ -302,7 +302,28 @@ gruppi. Gli oggetti segnati "non installati" in Celsius vengono saltati.
 - **Open as new model** sostituisce il modello corrente; **Add to current
   model** aggiunge solo oggetti e materiali.
 - Celsius ha l'asse Y verso l'alto; FerroTherm usa x = X, y = profondità − Z,
-  z = Y. Controlla un paio di posizioni rispetto a Celsius.
+  z = Y.
+- Schede ruotate (per esempio verticali) e i componenti montati sopra
+  vengono posizionati con la rotazione della scheda; la normale della scheda
+  diventa l'asse di montaggio dei componenti. Rotazioni su un solo asse,
+  posizione dei componenti (angolo basso dell'impronta, qualunque sia
+  l'Origin_Point mostrato) e posizione dei solidi CAD nei gruppi sono
+  verificate confrontando un modello 2024.36 con l'export STEP fatto da
+  Celsius (19 oggetti coincidenti entro 1 µm).
+- Non ancora verificati, e quindi segnalati: rotazioni che combinano più
+  assi, schede inclinate di angoli non multipli di 90° (importate come
+  bounding box), componenti ruotati sulla scheda. Gli oggetti che finiscono
+  fuori dal contenitore vengono elencati negli avvisi: controllali.
+- Se in Celsius l'irraggiamento è attivo, viene attivato `[radiation]` con
+  le emissività superficiali dei materiali Celsius; le aperture irraggiano
+  verso l'ambiente.
+- I solidi CAD formati da più corpi che si toccano (pareti e guide di un
+  contenitore conduction-cooled) vengono voxelizzati correttamente: usa
+  `--shape voxel:1` (o il voxel in GUI) per un contenitore cavo, perché la
+  bounding box lo riempirebbe di alluminio.
+- Le schede poligonali usano il rettangolo che contiene il contorno
+  (`Outline`); le dimensioni Width/Depth salvate da Celsius per queste schede
+  possono essere vecchie.
 - Gli oggetti non ancora supportati (ventole, vent, cold plate, sensori…)
   sono elencati negli avvisi della finestra di import.
 - La turbolenza k-ε di Celsius diventa LVEL (segnalato).
@@ -351,7 +372,11 @@ ferrotherm pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
 ```
 
 `ferrotherm run` termina con codice **2** se un componente supera il suo
-limite di Tj: si può usare come controllo automatico.
+limite di Tj e con codice **3** se il calcolo del flusso non è arrivato a
+convergenza: si può usare come controllo automatico. Un calcolo stazionario
+con flusso si ferma prima del numero massimo di iterazioni solo se le
+temperature chiave sono stabili *e* i residui di massa ed energia sono sotto
+dieci volte la `tolerance`.
 
 I file caso (`.toml`) sono testo: si possono scrivere a mano, confrontare
 con Git e aprire indifferentemente dall'interfaccia o dalla riga di comando.

@@ -126,11 +126,9 @@ impl ImportDialog {
                     }
                     Ok((src, Imported::Mcad(m))) => State::Mcad(src, Box::new(m)),
                     Ok((_, Imported::Project(m))) => {
-                        if !m.cad.is_empty() {
+                        if let BlockMode::Voxels(v) = m.default_cad_mode() {
                             self.voxel = true;
-                            let d = &m.case.domain;
-                            let big = (0..3).map(|a| d.max[a] - d.min[a]).fold(0.0, f64::max);
-                            self.voxel_mm = (big / 120.0).clamp(1.0, 5.0).round();
+                            self.voxel_mm = v;
                         }
                         State::Project(m)
                     }

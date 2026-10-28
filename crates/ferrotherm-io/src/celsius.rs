@@ -17,7 +17,9 @@
 //!
 //! Mapped objects: chassis (domain, walls), environment (ambient, external
 //! convection and radiation), fluid, solver settings (flow, gravity,
-//! turbulence, iterations), materials, PCBs (layered stack), components
+//! turbulence, iterations, surface-to-surface radiation with the materials'
+//! surface emissivities), materials, PCBs (layered stack, any orientation
+//! that is a multiple of 90°, with the parts mounted on them), components
 //! (2R compact models or solid blocks with power), extruded heat sinks, gap
 //! pads, solid obstructions (cuboids and CAD solids, voxelised) and groups.
 //! Every object type that is present but not mapped is listed in the
@@ -29,7 +31,8 @@
 use crate::step::{StepBody, V3};
 use crate::xml::{self, XNode};
 use ferrotherm_core::case::{
-    Block, Boundary, BoundaryKind, Case, Component, Face, FlowSettings, Turbulence,
+    Block, Boundary, BoundaryKind, Case, Component, Face, FlowSettings, RadiationSettings,
+    Turbulence,
 };
 use ferrotherm_core::library::{CaseFace, Conductivity, Material};
 use ferrotherm_core::pcb::{CopperLayer, PcbStack};
@@ -268,6 +271,8 @@ pub struct CadBody {
     pub body: StepBody,
     pub material: String,
     pub power_w: f64,
+    /// Surface emissivity for radiation (from the Celsius material).
+    pub emissivity: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +310,8 @@ impl Frame {
 struct Ctx {
     f: Frame,
     mats: HashMap<String, String>,
+    /// FerroTherm material id → surface emissivity of the Celsius material.
+    eps: HashMap<String, f64>,
     case: Case,
     cad: Vec<CadBody>,
     warnings: Vec<String>,
@@ -335,11 +342,17 @@ impl Ctx {
             .unwrap_or_else(|| fallback.to_string())
     }
     fn block(&mut self, name: &str, mat: String, lo: V3, hi: V3, power: f64) {
+        self.block_in(&Pose::ID, name, mat, lo, hi, power);
+    }
+    /// Block given in the local frame of `pose`.
+    fn block_in(&mut self, pose: &Pose, name: &str, mat: String, lo: V3, hi: V3, power: f64) {
+        let (lo, hi) = pose.bx(lo, hi);
         let (a, b) = self.f.bx(lo, hi);
         if (0..3).any(|k| b[k] - a[k] <= 1e-9) {
             return;
         }
         let name = self.unique(name);
+        let emissivity = self.eps.get(&mat).copied();
         self.case.blocks.push(Block {
             name,
             material: Some(mat),
@@ -347,7 +360,7 @@ impl Ctx {
             min: a,
             max: b,
             power_w: power,
-            emissivity: None,
+            emissivity,
             finish: None,
         });
     }
@@ -450,6 +463,12 @@ fn materials(root: &XNode, ctx: &mut Ctx) {
         let mid = if *n == 1 { base } else { format!("{base}-{n}") };
         match material(m, mid.clone()) {
             Some(mat) => {
+                if let Some(e) = txt(m, "Heat_Radiation_Properties/Surface_Emissivity/Value")
+                    .and_then(val)
+                    .filter(|e| (0.0..=1.0).contains(e))
+                {
+                    ctx.eps.insert(mid.clone(), e);
+                }
                 ctx.mats.insert(id.to_string(), mid);
                 ctx.case.materials.push(mat);
                 ctx.count("Material");
@@ -462,11 +481,156 @@ fn materials(root: &XNode, ctx: &mut Ctx) {
     }
 }
 
+// ------------------------------------------------------------------ orientation
+
+/// 3×3 rotation, row-major.
+type M3 = [[f64; 3]; 3];
+
+const I3: M3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+fn mul3(a: &M3, b: &M3) -> M3 {
+    let mut m = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i][j] = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    m
+}
+
+fn mv3(a: &M3, v: V3) -> V3 {
+    [0, 1, 2].map(|i| a[i][0] * v[0] + a[i][1] * v[1] + a[i][2] * v[2])
+}
+
+/// Right-handed rotation by `deg` about the unit vector `u` (Rodrigues).
+fn rot_about(u: V3, deg: f64) -> M3 {
+    let n = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+    if n < 1e-12 || deg.abs() < 1e-12 {
+        return I3;
+    }
+    let [x, y, z] = [u[0] / n, u[1] / n, u[2] / n];
+    let (s, c) = deg.to_radians().sin_cos();
+    let t = 1.0 - c;
+    let mut m = [
+        [t * x * x + c, t * x * y - s * z, t * x * z + s * y],
+        [t * x * y + s * z, t * y * y + c, t * y * z - s * x],
+        [t * x * z - s * y, t * y * z + s * x, t * z * z + c],
+    ];
+    // exact zeros and ones for the usual multiples of 90°
+    for r in m.iter_mut() {
+        for v in r.iter_mut() {
+            for e in [-1.0, 0.0, 1.0] {
+                if (*v - e).abs() < 1e-12 {
+                    *v = e;
+                }
+            }
+        }
+    }
+    m
+}
+
+/// Orientation of an object in its parent frame (Celsius axes), and a note
+/// when the conversion relies on a convention not verified on real models.
+///
+/// Verified (model exported to STEP by Celsius EC Solver 2024.36): an
+/// "Ordered" rotation of +90° about X turns a board's local +Z into −Y and
+/// its local +Y (the board normal) into +Z, i.e. right-handed rotations
+/// about the object's placement point (its low corner).
+fn orientation(n: &XNode) -> (M3, Option<String>) {
+    let Some(o) = at(n, "Placement/Orientation") else {
+        return (I3, None);
+    };
+    let num = |k: &str| txt(o, k).and_then(val).unwrap_or(0.0);
+    let ang = |k: &str| txt(o, k).and_then(deg).unwrap_or(0.0);
+    if txt(o, "Rotation_Mechanism").is_some_and(|m| m.eq_ignore_ascii_case("Angle and Axis")) {
+        let a = ang("Angle");
+        let r = rot_about([num("X_Axis"), num("Y_Axis"), num("Z_Axis")], a);
+        return (r, None);
+    }
+    let order = txt(o, "Rotation_Order")
+        .unwrap_or("XYZ")
+        .to_ascii_uppercase();
+    let angles = [ang("Angle_1"), ang("Angle_2"), ang("Angle_3")];
+    let mut r = I3;
+    for (c, a) in order.chars().zip(angles) {
+        let u = match c {
+            'X' => [1.0, 0.0, 0.0],
+            'Y' => [0.0, 1.0, 0.0],
+            _ => [0.0, 0.0, 1.0],
+        };
+        r = mul3(&r, &rot_about(u, a));
+    }
+    let turned = angles.iter().filter(|a| a.abs() > 1e-9).count();
+    let note = (turned > 1).then(|| {
+        format!("rotation {order} {angles:?}° combines several axes: the order convention is not verified yet, check the placement")
+    });
+    (r, note)
+}
+
+/// True when the rotation maps axes onto axes (multiples of 90°).
+fn axis_aligned(r: &M3) -> bool {
+    r.iter()
+        .all(|row| row.iter().filter(|v| v.abs() > 1e-9).count() == 1)
+}
+
+/// Rigid placement of a local frame in the Celsius frame: p ↦ R p + t.
+#[derive(Clone, Copy)]
+struct Pose {
+    r: M3,
+    t: V3,
+}
+
+impl Pose {
+    const ID: Pose = Pose { r: I3, t: [0.0; 3] };
+    fn apply(&self, p: V3) -> V3 {
+        let q = mv3(&self.r, p);
+        [q[0] + self.t[0], q[1] + self.t[1], q[2] + self.t[2]]
+    }
+    /// Bounding box of a local box (exact when the rotation is axis-aligned).
+    fn bx(&self, lo: V3, hi: V3) -> (V3, V3) {
+        let mut a = [f64::INFINITY; 3];
+        let mut b = [f64::NEG_INFINITY; 3];
+        for i in 0..8 {
+            let c = [
+                if i & 1 == 0 { lo[0] } else { hi[0] },
+                if i & 2 == 0 { lo[1] } else { hi[1] },
+                if i & 4 == 0 { lo[2] } else { hi[2] },
+            ];
+            let p = self.apply(c);
+            for k in 0..3 {
+                a[k] = a[k].min(p[k]);
+                b[k] = b[k].max(p[k]);
+            }
+        }
+        (a, b)
+    }
+    /// Celsius axis and sign of the local axis `k` (axis-aligned rotations).
+    fn axis(&self, k: usize) -> (usize, f64) {
+        let col = [self.r[0][k], self.r[1][k], self.r[2][k]];
+        let a = (0..3)
+            .max_by(|&i, &j| col[i].abs().total_cmp(&col[j].abs()))
+            .unwrap_or(1);
+        (a, col[a].signum())
+    }
+}
+
+/// FerroTherm axis and sign of a Celsius axis (x = X, y = depth − Z, z = Y).
+fn ft_axis(celsius_axis: usize, sign: f64) -> (usize, f64) {
+    match celsius_axis {
+        0 => (0, sign),
+        1 => (2, sign),
+        _ => (1, -sign),
+    }
+}
+
+const AXIS_NAME: [&str; 3] = ["x", "y", "z"];
+
 // ------------------------------------------------------------------ objects
 
-/// Board in Celsius coordinates: low corner and thickness.
+/// Board frame: local x across the width, y through the thickness (top
+/// side at y = t), z along the depth; origin at the placement point.
 struct BoardRef {
-    lo: V3,
+    pose: Pose,
     t: f64,
 }
 
@@ -545,52 +709,61 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
     };
     let ang = footprint_angle(n, &mut ctx.warnings, &format!("component {name}"));
     let (w, d) = rotated(w, d, ang);
-    let x = mm(n, "Placement/X_Location").unwrap_or(0.0);
+    // The stored location is the low corner of the footprint, whatever the
+    // displayed Origin_Point ("Low Centre" included): verified against the
+    // STEP export of a Celsius EC Solver 2024.36 model.
+    let x0 = mm(n, "Placement/X_Location").unwrap_or(0.0);
     let y = mm(n, "Placement/Y_Location").unwrap_or(0.0);
-    let z = mm(n, "Placement/Z_Location").unwrap_or(0.0);
-    let centre = txt(n, "Placement/Origin_Point").is_none_or(|o| o.contains("Centre"));
-    let (x0, z0) = if centre {
-        (x - 0.5 * w, z - 0.5 * d)
-    } else {
-        (x, z)
-    };
+    let z0 = mm(n, "Placement/Z_Location").unwrap_or(0.0);
+    if ang.abs() > 1e-9 {
+        ctx.warnings.push(format!(
+            "component {name}: footprint rotated by {ang}° on the board, placed by the low corner of the rotated footprint (convention not verified)"
+        ));
+    }
     let bottom = txt(n, "Placement/Board_Side").is_some_and(|s| s.eq_ignore_ascii_case("Bottom"));
-    let (lo, hi) = match board {
+    // local box (board frame, or the chassis frame without a board)
+    let (pose, lo, hi) = match board {
         Some(b) => {
             let (ylo, yhi) = if bottom {
-                (b.lo[1] - y - h, b.lo[1] - y)
+                (-y - h, -y)
             } else {
-                (b.lo[1] + b.t + y, b.lo[1] + b.t + y + h)
+                (b.t + y, b.t + y + h)
             };
-            (
-                [b.lo[0] + x0, ylo, b.lo[2] + z0],
-                [b.lo[0] + x0 + w, yhi, b.lo[2] + z0 + d],
-            )
+            (b.pose, [x0, ylo, z0], [x0 + w, yhi, z0 + d])
         }
-        None => ([x0, y, z0], [x0 + w, y + h, z0 + d]),
+        None => (Pose::ID, [x0, y, z0], [x0 + w, y + h, z0 + d]),
     };
+    // board normal (local +y) in FerroTherm axes; the case faces away from the board
+    let (cax, csign) = pose.axis(1);
+    let (normal, nsign) = ft_axis(cax, csign);
+    let case_up = nsign * if bottom { -1.0 } else { 1.0 } > 0.0;
     let power = power_of(n);
     let level = txt(n, "Construction/Modelling_Level").unwrap_or("");
     let rjc = txt(n, "Construction/Junction-to-Case_Thermal_Resistance").and_then(val);
     let rjb = txt(n, "Construction/Junction-to-Board_Thermal_Resistance").and_then(val);
     if level.eq_ignore_ascii_case("2R") && (rjc.is_some() || rjb.is_some()) {
+        let (lo, hi) = pose.bx(lo, hi);
         let (a, b) = ctx.f.bx(lo, hi);
         let name = ctx.unique(&name);
         ctx.case.components.push(Component {
             name,
             package: "generic".into(),
             position: a,
-            size: Some([b[0] - a[0], b[1] - a[1], b[2] - a[2]]),
+            // [L, W, H]: the two in-plane extents (increasing axis order), then the height
+            size: Some({
+                let e = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let t: Vec<usize> = (0..3).filter(|&k| k != normal).collect();
+                [e[t[0]], e[t[1]], e[normal]]
+            }),
             power_w: power,
             r_jc: rjc,
             r_jb: rjb,
-            // the case is the face away from the board
-            case_face: Some(if bottom {
-                CaseFace::Bottom
-            } else {
+            case_face: Some(if case_up {
                 CaseFace::Top
+            } else {
+                CaseFace::Bottom
             }),
-            mount_axis: "z".into(),
+            mount_axis: AXIS_NAME[normal].into(),
             derating: None,
             tj_max_c: None,
             network: None,
@@ -605,7 +778,7 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
             ));
         }
         let mat = ctx.mat(txt(n, "Construction/MaterialLink"), "mold-compound");
-        ctx.block(&name, mat, lo, hi, power);
+        ctx.block_in(&pose, &name, mat, lo, hi, power);
     }
 }
 
@@ -648,10 +821,12 @@ fn heatsink(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         mm(n, "Placement/Y_Offset").unwrap_or(0.0),
         mm(n, "Placement/Z_Offset").unwrap_or(0.0),
     );
-    let (bx, by, bz, dir) = match board {
-        Some(b) if bottom => (b.lo[0] + x0, b.lo[1] - yoff, b.lo[2] + z0, -1.0),
-        Some(b) => (b.lo[0] + x0, b.lo[1] + b.t + yoff, b.lo[2] + z0, 1.0),
+    // base low corner in the board frame (or the chassis frame)
+    let (pose, bx, by, bz, dir) = match board {
+        Some(b) if bottom => (b.pose, x0, -yoff, z0, -1.0),
+        Some(b) => (b.pose, x0, b.t + yoff, z0, 1.0),
         None => (
+            Pose::ID,
             mm(n, "Placement/X_Location").unwrap_or(0.0),
             mm(n, "Placement/Y_Location").unwrap_or(0.0),
             mm(n, "Placement/Z_Location").unwrap_or(0.0),
@@ -666,7 +841,8 @@ fn heatsink(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         }
     };
     let (y0, y1) = span(by, bt);
-    ctx.block(
+    ctx.block_in(
+        &pose,
         &format!("{name}/base"),
         mat,
         [bx, y0, bz],
@@ -688,7 +864,8 @@ fn heatsink(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
             } else {
                 bx + 0.5 * (bw - ft)
             };
-            ctx.block(
+            ctx.block_in(
+                &pose,
                 &format!("{name}/fin{}", i + 1),
                 fin_mat.clone(),
                 [xf, f0, zf],
@@ -714,15 +891,21 @@ fn gap_pad(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         mm(n, "Placement/Y_Location").unwrap_or(0.0),
         mm(n, "Placement/Z_Location").unwrap_or(0.0),
     ];
-    let lo = match board {
-        Some(b) => [b.lo[0] + p[0], b.lo[1] + p[1], b.lo[2] + p[2]],
-        None => p,
-    };
+    // offsets from the board placement point in the board frame
+    let pose = board.map(|b| b.pose).unwrap_or(Pose::ID);
+    let lo = p;
     let mat = ctx.mat(
         txt(n, "Cooling/MaterialLink").or_else(|| txt(n, "Construction/MaterialLink")),
         "tim-gap-pad-3",
     );
-    ctx.block(&name, mat, lo, [lo[0] + w, lo[1] + h, lo[2] + d], 0.0);
+    ctx.block_in(
+        &pose,
+        &name,
+        mat,
+        lo,
+        [lo[0] + w, lo[1] + h, lo[2] + d],
+        0.0,
+    );
 }
 
 fn pcb(ctx: &mut Ctx, n: &XNode) {
@@ -732,13 +915,25 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
         return;
     }
     let name = name_of(n);
-    let w = mm(n, "Geometry/Width").unwrap_or(100.0);
-    let d = mm(n, "Geometry/Depth").unwrap_or(100.0);
     let t = mm(n, "Geometry/Thickness").unwrap_or(1.6);
+    // footprint in the board plane (local x, z)
+    let mut fx = [0.0, mm(n, "Geometry/Width").unwrap_or(100.0)];
+    let mut fz = [0.0, mm(n, "Geometry/Depth").unwrap_or(100.0)];
     if let Some(s) = txt(n, "Geometry/Shape") {
         if !s.eq_ignore_ascii_case("Rectangle") {
+            // Width/Depth of a polygon board can be stale: the outline is the
+            // geometry (its area matches the stored Surface_Area).
+            let pts = curve(txt(n, "Geometry/Outline").unwrap_or(""));
+            if pts.len() >= 3 {
+                fx = [f64::INFINITY, f64::NEG_INFINITY];
+                fz = fx;
+                for p in &pts {
+                    fx = [fx[0].min(p[0]), fx[1].max(p[0])];
+                    fz = [fz[0].min(p[1]), fz[1].max(p[1])];
+                }
+            }
             ctx.warnings.push(format!(
-                "PCB {name}: shape '{s}' imported as its bounding rectangle"
+                "PCB {name}: shape '{s}' imported as the bounding rectangle of its outline"
             ));
         }
     }
@@ -746,15 +941,25 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
     if yes(n, "Placement/Height_From_Stand_Offs") {
         y += mm(n, "Placement/Stand_Off_Height").unwrap_or(0.0);
     }
-    let lo = [
-        mm(n, "Placement/X_Location").unwrap_or(0.0),
-        y,
-        mm(n, "Placement/Z_Location").unwrap_or(0.0),
-    ];
-    if footprint_angle(n, &mut ctx.warnings, &format!("PCB {name}")).abs() > 1e-9 {
-        ctx.warnings
-            .push(format!("PCB {name}: rotation in the board plane ignored"));
+    let (r, note) = orientation(n);
+    if let Some(note) = note {
+        ctx.warnings.push(format!("PCB {name}: {note}"));
     }
+    if !axis_aligned(&r) {
+        ctx.warnings.push(format!(
+            "PCB {name}: tilted (not a multiple of 90°), imported as its axis-aligned bounding box"
+        ));
+    }
+    let pose = Pose {
+        r,
+        t: [
+            mm(n, "Placement/X_Location").unwrap_or(0.0),
+            y,
+            mm(n, "Placement/Z_Location").unwrap_or(0.0),
+        ],
+    };
+    let (nax, _) = pose.axis(1);
+    let normal = ft_axis(nax, 1.0).0;
     let c = at(n, "Construction");
     let level = c
         .and_then(|c| txt(c, "Modelling_Level"))
@@ -770,7 +975,7 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
         copper_oz: None,
         coverage: None,
         via_fraction: 0.0,
-        normal: "z".into(),
+        normal: AXIS_NAME[normal].into(),
     };
     let per_layer: Vec<CopperLayer> = c
         .and_then(|c| at(c, "Conductor_Layers"))
@@ -814,7 +1019,8 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
         + txt(n, "Power/Bottom_Distributed_Power")
             .and_then(power_w)
             .unwrap_or(0.0);
-    let (a, b) = ctx.f.bx(lo, [lo[0] + w, lo[1] + t, lo[2] + d]);
+    let (lo, hi) = pose.bx([fx[0], 0.0, fz[0]], [fx[1], t, fz[1]]);
+    let (a, b) = ctx.f.bx(lo, hi);
     let bname = ctx.unique(&name);
     ctx.case.blocks.push(Block {
         name: bname,
@@ -826,7 +1032,7 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
         emissivity: txt(n, "Construction/Top_Surface_Emissivity").and_then(val),
         finish: None,
     });
-    let board = BoardRef { lo, t };
+    let board = BoardRef { pose, t };
     for (list, item) in [
         ("Components", "Component"),
         ("Heatsinks", "Heatsink"),
@@ -947,7 +1153,7 @@ fn solid_tris(s: &XNode) -> Vec<[V3; 3]> {
     out
 }
 
-fn obstruction(ctx: &mut Ctx, n: &XNode, offset: V3, cad: &Cad) {
+fn obstruction(ctx: &mut Ctx, n: &XNode, cad: &Cad) {
     ctx.count("Solid_Obstruction");
     if !installed(n) {
         ctx.uninstalled += 1;
@@ -985,6 +1191,14 @@ fn obstruction(ctx: &mut Ctx, n: &XNode, offset: V3, cad: &Cad) {
             chain.push(transform(pn));
             parent = pp.clone();
         }
+        // The obstruction's own location places the solid (the enclosing
+        // groups' locations are not added): verified against the STEP export
+        // of a Celsius EC Solver 2024.36 model.
+        let at_ = [
+            mm(n, "Placement/X_Location").unwrap_or(0.0),
+            mm(n, "Placement/Y_Location").unwrap_or(0.0),
+            mm(n, "Placement/Z_Location").unwrap_or(0.0),
+        ];
         let tris: Vec<[V3; 3]> = solid_tris(solid)
             .into_iter()
             .map(|t| {
@@ -992,8 +1206,7 @@ fn obstruction(ctx: &mut Ctx, n: &XNode, offset: V3, cad: &Cad) {
                     for m in &chain {
                         p = apply(m, p);
                     }
-                    ctx.f
-                        .p([p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]])
+                    ctx.f.p([p[0] + at_[0], p[1] + at_[1], p[2] + at_[2]])
                 })
             })
             .collect();
@@ -1023,6 +1236,7 @@ fn obstruction(ctx: &mut Ctx, n: &XNode, offset: V3, cad: &Cad) {
                 max: mx,
                 bbox_only: false,
             },
+            emissivity: ctx.eps.get(&mat).copied(),
             material: mat,
             power_w: power,
         });
@@ -1035,37 +1249,47 @@ fn obstruction(ctx: &mut Ctx, n: &XNode, offset: V3, cad: &Cad) {
         let w = mm(n, "Geometry/Width").unwrap_or(1.0);
         let h = mm(n, "Geometry/Height").unwrap_or(1.0);
         let d = mm(n, "Geometry/Depth").unwrap_or(1.0);
-        let mut p = [
-            mm(n, "Placement/X_Location").unwrap_or(0.0) + offset[0],
-            mm(n, "Placement/Y_Location").unwrap_or(0.0) + offset[1],
-            mm(n, "Placement/Z_Location").unwrap_or(0.0) + offset[2],
-        ];
+        let mut p = [0.0; 3];
         if txt(n, "Placement/Origin_Point").is_some_and(|o| o.contains("Centre")) {
             p[0] -= 0.5 * w;
             p[2] -= 0.5 * d;
         }
-        ctx.block(&name, mat, p, [p[0] + w, p[1] + h, p[2] + d], power);
+        let (r, note) = orientation(n);
+        if let Some(note) = note {
+            ctx.warnings.push(format!("obstruction {name}: {note}"));
+        }
+        if !axis_aligned(&r) {
+            ctx.warnings.push(format!(
+                "obstruction {name}: tilted (not a multiple of 90°), imported as its axis-aligned bounding box"
+            ));
+        }
+        let pose = Pose {
+            r,
+            t: [
+                mm(n, "Placement/X_Location").unwrap_or(0.0),
+                mm(n, "Placement/Y_Location").unwrap_or(0.0),
+                mm(n, "Placement/Z_Location").unwrap_or(0.0),
+            ],
+        };
+        ctx.block_in(&pose, &name, mat, p, [p[0] + w, p[1] + h, p[2] + d], power);
     }
 }
 
-/// Walk a list of chassis-level objects (with the accumulated group offset).
-fn objects(ctx: &mut Ctx, list: &XNode, offset: V3, cad: &Cad) {
+/// Walk a list of chassis-level objects. Objects inside groups carry
+/// positions in the chassis frame: the group's own location is not added
+/// (verified against the STEP export of a Celsius EC Solver 2024.36 model).
+fn objects(ctx: &mut Ctx, list: &XNode, cad: &Cad) {
     for o in &list.children {
         match o.name.as_str() {
-            "Solid_Obstruction" => obstruction(ctx, o, offset, cad),
+            "Solid_Obstruction" => obstruction(ctx, o, cad),
             "Group_Obstruction" => {
                 ctx.count("Group_Obstruction");
                 if !installed(o) {
                     ctx.uninstalled += 1;
                     continue;
                 }
-                let off = [
-                    offset[0] + mm(o, "Placement/X_Location").unwrap_or(0.0),
-                    offset[1] + mm(o, "Placement/Y_Location").unwrap_or(0.0),
-                    offset[2] + mm(o, "Placement/Z_Location").unwrap_or(0.0),
-                ];
                 if let Some(l) = o.child("Obstructions") {
-                    objects(ctx, l, off, cad);
+                    objects(ctx, l, cad);
                 }
             }
             _ if !o.children.is_empty() => ctx.skip(&o.name),
@@ -1155,7 +1379,7 @@ fn chassis(ctx: &mut Ctx, ch: &XNode, cad: &Cad, top: bool) {
         }
     }
     if let Some(l) = ch.child("Obstructions") {
-        objects(ctx, l, [0.0; 3], cad);
+        objects(ctx, l, cad);
     }
     if let Some(l) = ch.child("Subchassis") {
         for c in l.children("Chassis") {
@@ -1203,6 +1427,24 @@ fn chassis(ctx: &mut Ctx, ch: &XNode, cad: &Cad, top: bool) {
     }
 }
 
+/// Box of an imported component: `size` is [L, W, H], the in-plane extents
+/// in increasing axis order and H along the mount axis.
+fn component_extent(c: &Component) -> (V3, V3) {
+    let s = c.size.unwrap_or([0.0; 3]);
+    let n = match c.mount_axis.as_str() {
+        "x" => 0,
+        "y" => 1,
+        _ => 2,
+    };
+    let t: Vec<usize> = (0..3).filter(|&k| k != n).collect();
+    let mut e = [0.0; 3];
+    e[t[0]] = s[0];
+    e[t[1]] = s[1];
+    e[n] = s[2];
+    let p = c.position;
+    (p, [p[0] + e[0], p[1] + e[1], p[2] + e[2]])
+}
+
 // ------------------------------------------------------------------ entry point
 
 /// Read a Celsius EC Solver model (`.equipment` archive, its inner file or the XML).
@@ -1233,6 +1475,7 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
     let mut ctx = Ctx {
         f: Frame { depth },
         mats: HashMap::new(),
+        eps: HashMap::new(),
         case,
         cad: vec![],
         warnings: vec![],
@@ -1255,7 +1498,14 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
     if solve_flow {
         if let Some(f) = &fl {
             ctx.case.domain.material = f.id.clone();
-            let mut fs = FlowSettings::default();
+            // Celsius relaxes momentum strongly (false time step 0.1 s) and the
+            // temperature hardly at all; the FerroTherm default momentum
+            // relaxation (0.6) diverged on sealed conduction-cooled chassis
+            // with radiation, 0.3 converges them.
+            let mut fs = FlowSettings {
+                relax_velocity: 0.3,
+                ..FlowSettings::default()
+            };
             if let Some(s) = sc {
                 if let Some(g) = at(s, "Gravity") {
                     if txt(g, "Active").is_some_and(|a| a.eq_ignore_ascii_case("no")) {
@@ -1312,6 +1562,11 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
         .and_then(|r| txt(r, "Emissivity"))
         .and_then(val);
 
+    // internal surface-to-surface radiation (openings radiate to the ambient)
+    if sc.is_some_and(|s| yes(s, "Heat_Radiation/Active")) {
+        ctx.case.radiation = Some(RadiationSettings::default());
+    }
+
     let cad = index_cad(project);
     chassis(&mut ctx, top, &cad, true);
 
@@ -1366,6 +1621,43 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
     ctx.case.grid.max_cell_mm =
         ferrotherm_core::case::MaybeVec3::Scalar((big / 60.0).clamp(1.0, 6.0));
 
+    // objects outside the top-level chassis point at a placement convention
+    // this importer does not handle yet
+    let (dlo, dhi) = (ctx.case.domain.min, ctx.case.domain.max);
+    let out = |lo: V3, hi: V3| (0..3).any(|k| lo[k] < dlo[k] - 1e-3 || hi[k] > dhi[k] + 1e-3);
+    let mut outside: Vec<String> = ctx
+        .case
+        .blocks
+        .iter()
+        .filter(|b| out(b.min, b.max))
+        .map(|b| b.name.clone())
+        .collect();
+    outside.extend(
+        ctx.case
+            .components
+            .iter()
+            .filter(|c| {
+                let (lo, hi) = component_extent(c);
+                out(lo, hi)
+            })
+            .map(|c| c.name.clone()),
+    );
+    outside.extend(
+        ctx.cad
+            .iter()
+            .filter(|c| out(c.body.min, c.body.max))
+            .map(|c| c.body.name.clone()),
+    );
+    if !outside.is_empty() {
+        let n = outside.len();
+        outside.truncate(8);
+        ctx.warnings.push(format!(
+            "{n} object(s) lie partly outside the chassis ({}{}): their placement may use a convention not verified yet, check them",
+            outside.join(", "),
+            if n > 8 { ", …" } else { "" }
+        ));
+    }
+
     if ctx.uninstalled > 0 {
         ctx.warnings.push(format!(
             "{} objects marked 'not installed' in Celsius were skipped",
@@ -1412,12 +1704,25 @@ impl CelsiusModel {
                     min: lo,
                     max: hi,
                     power_w: if vol > 0.0 { c.power_w * v / vol } else { 0.0 },
-                    emissivity: None,
+                    emissivity: c.emissivity,
                     finish: None,
                 });
             }
         }
         case
+    }
+
+    /// How CAD solids become blocks unless the user chooses: voxels of about
+    /// 1/120 of the largest model side (1–5 mm). A bounding box would fill a
+    /// hollow chassis with metal.
+    pub fn default_cad_mode(&self) -> crate::step::BlockMode {
+        let d = &self.case.domain;
+        let big = (0..3).map(|a| d.max[a] - d.min[a]).fold(0.0, f64::max);
+        if self.cad.is_empty() {
+            crate::step::BlockMode::BoundingBox
+        } else {
+            crate::step::BlockMode::Voxels((big / 120.0).clamp(1.0, 5.0).round())
+        }
     }
 
     pub fn summary(&self) -> String {
@@ -1544,14 +1849,16 @@ mod tests {
         assert_eq!(st.layers, Some(4));
         assert!((st.coverage.unwrap() - 0.6).abs() < 1e-12);
         assert_eq!(st.dielectric, "ecs-fr4");
-        // U1: 2R on top, centre (50, 40) → x 55..65, Celsius z 42..48 → y 102..108
+        // U1: 2R on top, low corner (50, 40) on the board at (10, 5) → x 60..70, Celsius z 45..51 → y 99..105
         let u1 = c.components.iter().find(|x| x.name == "U1").unwrap();
         assert_eq!(u1.r_jc, Some(5.0));
         assert_eq!(u1.r_jb, Some(10.0));
         assert_eq!(u1.power_w, 2.0);
-        assert!((u1.position[0] - 55.0).abs() < 1e-9);
-        assert!((u1.position[1] - 102.0).abs() < 1e-9);
+        assert!((u1.position[0] - 60.0).abs() < 1e-9);
+        assert!((u1.position[1] - 99.0).abs() < 1e-9);
         assert!((u1.position[2] - 21.6).abs() < 1e-9);
+        assert_eq!(u1.mount_axis, "z");
+        assert_eq!(u1.case_face, Some(CaseFace::Top));
         // U2 not installed; Q1 bottom, rotated 90°: footprint 4 × 8, below the board
         assert!(
             c.components.iter().all(|x| x.name != "U2") && c.blocks.iter().all(|x| x.name != "U2")
@@ -1570,5 +1877,98 @@ mod tests {
         let text = c.to_toml().unwrap();
         let back = Case::from_toml(&text).unwrap();
         assert_eq!(back.materials.len(), c.materials.len());
+    }
+
+    /// A vertical board as in the reference model (Celsius 2024.36, checked
+    /// against its STEP export): "Ordered" XZY rotation of +90°, a 2R part on
+    /// the top side and a block part.
+    #[test]
+    fn rotated_board() {
+        let model = MODEL
+            .replace(
+                "<Geometry><Height>50 mm</Height><Width>200 mm</Width><Depth>150 mm</Depth></Geometry>",
+                "<Geometry><Height>200 mm</Height><Width>207 mm</Width><Depth>200 mm</Depth></Geometry>",
+            )
+            .replace(
+                "<X_Location>10 mm</X_Location><Y_Location>20 mm</Y_Location><Z_Location>5 mm</Z_Location><Height_From_Stand_Offs>No</Height_From_Stand_Offs>",
+                "<X_Location>26 mm</X_Location><Y_Location>122 mm</Y_Location><Z_Location>29 mm</Z_Location><Height_From_Stand_Offs>No</Height_From_Stand_Offs><Orientation><Rotation_Mechanism>Ordered</Rotation_Mechanism><Rotation_Order>XZY</Rotation_Order><Angle_1>90 degrees</Angle_1><Angle_2>0 degrees</Angle_2><Angle_3>0 degrees</Angle_3></Orientation>",
+            )
+            .replace(
+                "<Width>100 mm</Width><Depth>80 mm</Depth>",
+                "<Width>160 mm</Width><Depth>100 mm</Depth>",
+            )
+            // U1 as FPGA U1 of the reference: 35 × 35 × 3 at (62.5, 32.5)
+            .replace(
+                "<Height>2 mm</Height><Width>10 mm</Width><Depth>6 mm</Depth>",
+                "<Height>3 mm</Height><Width>35 mm</Width><Depth>35 mm</Depth>",
+            )
+            .replace("<X_Location>50 mm</X_Location>", "<X_Location>62.5 mm</X_Location>")
+            .replace(
+                "<Y_Location>0 mm</Y_Location><Z_Location>40 mm</Z_Location>",
+                "<Y_Location>0 mm</Y_Location><Z_Location>32.5 mm</Z_Location>",
+            );
+        let m = read(&container(&model)).unwrap();
+        let c = &m.case;
+        assert!(
+            !m.warnings
+                .iter()
+                .any(|w| w.contains("outside") || w.contains("several axes")),
+            "{:?}",
+            m.warnings
+        );
+        let d = 200.0;
+        // Celsius box → FerroTherm box (x = X, y = D − Z, z = Y)
+        let ft = |lo: V3, hi: V3| ([lo[0], d - hi[2], lo[1]], [hi[0], d - lo[2], hi[1]]);
+        let close = |a: V3, b: V3| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-9);
+        // board: X 26..186, Y 22..122, Z 29..30.6 (STEP export)
+        let b = c.blocks.iter().find(|b| b.name == "BOARD").unwrap();
+        let (lo, hi) = ft([26.0, 22.0, 29.0], [186.0, 122.0, 30.6]);
+        assert!(
+            close(b.min, lo) && close(b.max, hi),
+            "{:?} {:?}",
+            b.min,
+            b.max
+        );
+        assert_eq!(b.pcb.as_ref().unwrap().normal, "y");
+        // U1: X 88.5..123.5, Y 54.5..89.5, Z 30.6..33.6 (STEP export)
+        let u1 = c.components.iter().find(|x| x.name == "U1").unwrap();
+        let (lo, hi) = ft([88.5, 54.5, 30.6], [123.5, 89.5, 33.6]);
+        // size is [L, W, H] with H along the mount axis (y): extents x, z, y
+        let s = u1.size.unwrap();
+        let top = [
+            u1.position[0] + s[0],
+            u1.position[1] + s[2],
+            u1.position[2] + s[1],
+        ];
+        assert!(
+            close(u1.position, lo) && close(top, hi),
+            "{:?} {:?}",
+            u1.position,
+            s
+        );
+        // the board normal is FerroTherm y and the case looks towards −y
+        assert_eq!(u1.mount_axis, "y");
+        assert_eq!(u1.case_face, Some(CaseFace::Bottom));
+        // Q1 on the bottom side sits on the other face of the board (Z < 29)
+        let q1 = c.blocks.iter().find(|x| x.name == "Q1").unwrap();
+        assert!((q1.min[1] - (d - 29.0)).abs() < 1e-9 && (q1.max[1] - (d - 26.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotations() {
+        let r = rot_about([1.0, 0.0, 0.0], 90.0);
+        assert_eq!(mv3(&r, [0.0, 0.0, 1.0]), [0.0, -1.0, 0.0]);
+        assert_eq!(mv3(&r, [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]);
+        let r = rot_about([0.0, 1.0, 0.0], 180.0);
+        assert_eq!(mv3(&r, [1.0, 0.0, 0.0]), [-1.0, 0.0, 0.0]);
+        assert!(axis_aligned(&r));
+        assert!(!axis_aligned(&rot_about([0.0, 0.0, 1.0], 30.0)));
+        let p = Pose {
+            r: rot_about([1.0, 0.0, 0.0], 90.0),
+            t: [26.0, 122.0, 29.0],
+        };
+        assert_eq!(p.axis(1), (2, 1.0));
+        assert_eq!(p.axis(2), (1, -1.0));
+        assert_eq!(ft_axis(2, 1.0), (1, -1.0));
     }
 }

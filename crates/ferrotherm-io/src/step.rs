@@ -1027,6 +1027,51 @@ pub enum BlockMode {
 }
 
 /// Convert a body to axis-aligned boxes (mm).
+/// Connected shells of a triangle soup (triangles sharing a vertex) and,
+/// per triangle, (shell id, true when the shell is oriented inwards).
+fn shell_flips(tris: &[[V3; 3]]) -> Vec<(u32, bool)> {
+    let key = |p: V3| p.map(|v| (v * 1e6).round() as i64);
+    let mut parent: Vec<usize> = (0..tris.len()).collect();
+    fn find(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    let mut first: HashMap<[i64; 3], usize> = HashMap::new();
+    for (k, t) in tris.iter().enumerate() {
+        for &v in t {
+            match first.get(&key(v)) {
+                Some(&o) => {
+                    let (a, b) = (find(&mut parent, k), find(&mut parent, o));
+                    if a != b {
+                        parent[a] = b;
+                    }
+                }
+                None => {
+                    first.insert(key(v), k);
+                }
+            }
+        }
+    }
+    // signed volume per shell (divergence theorem)
+    let mut vol: HashMap<usize, f64> = HashMap::new();
+    for (k, t) in tris.iter().enumerate() {
+        let r = find(&mut parent, k);
+        let [a, b, c] = *t;
+        let v = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        *vol.entry(r).or_default() += v / 6.0;
+    }
+    (0..tris.len())
+        .map(|k| {
+            let r = find(&mut parent, k);
+            (r as u32, vol[&r] < 0.0)
+        })
+        .collect()
+}
+
 pub fn body_boxes(b: &StepBody, mode: BlockMode) -> Vec<(V3, V3)> {
     let res = match mode {
         BlockMode::BoundingBox => return vec![(b.min, b.max)],
@@ -1067,14 +1112,22 @@ pub fn body_boxes(b: &StepBody, mode: BlockMode) -> Vec<(V3, V3)> {
             }
         }
     }
-    // inside test along z for each column (parity of crossings)
+    // Inside test along z for each column. Bodies made of several closed
+    // shells that touch (walls and card guides of a chassis, stacked boxes)
+    // have coincident faces where one shell is left and the next entered: a
+    // plain parity count merges those crossings and inverts the solid. The
+    // crossings are therefore counted with their direction (winding number,
+    // each shell oriented outwards from its signed volume); a column whose
+    // winding does not close falls back to the parity count.
+    let flip = shell_flips(&b.tris);
     let mut vox = vec![false; n[0] * n[1] * n[2]];
     for j in 0..n[1] {
         for i in 0..n[0] {
             // tiny offset avoids hitting edges exactly
             let x = b.min[0] + (i as f64 + 0.5) * h[0] + 1.234e-7;
             let y = b.min[1] + (j as f64 + 0.5) * h[1] + 2.345e-7;
-            let mut zs: Vec<f64> = Vec::new();
+            // (z, +1 entering / −1 leaving, shell)
+            let mut hits: Vec<(f64, i32, u32)> = Vec::new();
             for &k in &bins[i + n[0] * j] {
                 let t = &b.tris[k as usize];
                 let (a, bb, c) = (t[0], t[1], t[2]);
@@ -1085,18 +1138,46 @@ pub fn body_boxes(b: &StepBody, mode: BlockMode) -> Vec<(V3, V3)> {
                 let u = ((x - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (y - a[1])) / d;
                 let v = ((bb[0] - a[0]) * (y - a[1]) - (x - a[0]) * (bb[1] - a[1])) / d;
                 if u >= 0.0 && v >= 0.0 && u + v <= 1.0 {
-                    zs.push(a[2] + u * (bb[2] - a[2]) + v * (c[2] - a[2]));
+                    // d is the z component of the (unnormalised) face normal
+                    let (shell, flipped) = flip[k as usize];
+                    let out = (d > 0.0) != flipped;
+                    hits.push((
+                        a[2] + u * (bb[2] - a[2]) + v * (c[2] - a[2]),
+                        if out { -1 } else { 1 },
+                        shell,
+                    ));
                 }
             }
-            zs.sort_by(|p, q| p.partial_cmp(q).unwrap());
-            zs.dedup_by(|p, q| (*p - *q).abs() < 1e-9);
-            for pair in zs.chunks(2) {
-                if pair.len() < 2 {
-                    break;
+            hits.sort_by(|p, q| p.0.total_cmp(&q.0));
+            // the same face hit twice on a shared edge: keep one
+            hits.dedup_by(|p, q| (p.0 - q.0).abs() < 1e-9 && p.1 == q.1 && p.2 == q.2);
+            let mut spans: Vec<(f64, f64)> = Vec::new();
+            let mut w = 0;
+            let mut start = 0.0;
+            for &(z, s, _) in &hits {
+                let was = w > 0;
+                w += s;
+                if !was && w > 0 {
+                    start = z;
+                } else if was && w <= 0 {
+                    spans.push((start, z));
                 }
+            }
+            if w != 0 {
+                // open or inconsistently oriented surface: parity
+                spans.clear();
+                let mut zs: Vec<f64> = hits.iter().map(|h| h.0).collect();
+                zs.dedup_by(|p, q| (*p - *q).abs() < 1e-9);
+                for pair in zs.chunks(2) {
+                    if pair.len() == 2 {
+                        spans.push((pair[0], pair[1]));
+                    }
+                }
+            }
+            for (z0, z1) in spans {
                 for k in 0..n[2] {
                     let z = b.min[2] + (k as f64 + 0.5) * h[2];
-                    if z > pair[0] && z < pair[1] {
+                    if z > z0 && z < z1 {
                         vox[i + n[0] * (j + n[1] * k)] = true;
                     }
                 }
@@ -1392,5 +1473,86 @@ mod tests {
         assert!((p[0] - 10.0).abs() < 1e-12 && (p[1] - 1.0).abs() < 1e-12);
         let q = a.inverse().apply(p);
         assert!((q[0] - 1.0).abs() < 1e-12 && q[1].abs() < 1e-12);
+    }
+
+    /// Closed box as 12 triangles, outward normals (or inward when `flip`).
+    fn cube(lo: V3, hi: V3, flip: bool) -> Vec<[V3; 3]> {
+        let c = |i: usize| -> V3 {
+            [
+                if i & 1 == 0 { lo[0] } else { hi[0] },
+                if i & 2 == 0 { lo[1] } else { hi[1] },
+                if i & 4 == 0 { lo[2] } else { hi[2] },
+            ]
+        };
+        // faces as corner indices, counter-clockwise seen from outside
+        let quads = [
+            [0, 2, 3, 1], // z min
+            [4, 5, 7, 6], // z max
+            [0, 1, 5, 4], // y min
+            [2, 6, 7, 3], // y max
+            [0, 4, 6, 2], // x min
+            [1, 3, 7, 5], // x max
+        ];
+        let mut t = Vec::new();
+        for q in quads {
+            let (a, b, cc, d) = (c(q[0]), c(q[1]), c(q[2]), c(q[3]));
+            if flip {
+                t.push([a, cc, b]);
+                t.push([a, d, cc]);
+            } else {
+                t.push([a, b, cc]);
+                t.push([a, cc, d]);
+            }
+        }
+        t
+    }
+
+    fn body(tris: Vec<[V3; 3]>) -> StepBody {
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for t in &tris {
+            for p in t {
+                for a in 0..3 {
+                    min[a] = min[a].min(p[a]);
+                    max[a] = max[a].max(p[a]);
+                }
+            }
+        }
+        StepBody {
+            name: "b".into(),
+            path: "b".into(),
+            tris,
+            min,
+            max,
+            bbox_only: false,
+        }
+    }
+
+    fn filled(b: &StepBody) -> f64 {
+        body_boxes(b, BlockMode::Voxels(1.0))
+            .iter()
+            .map(|(lo, hi)| (0..3).map(|a| hi[a] - lo[a]).product::<f64>())
+            .sum()
+    }
+
+    /// Shells touching along a face must not cancel each other: stacked
+    /// boxes sharing a face, and a rail standing on a wall (the card guides
+    /// of a conduction-cooled chassis, which were voxelised inverted).
+    #[test]
+    fn voxels_of_touching_shells() {
+        // stacked, sharing the face z = 10 (and its vertices)
+        let mut t = cube([0.0; 3], [10.0, 10.0, 10.0], false);
+        t.extend(cube([0.0, 0.0, 10.0], [10.0, 10.0, 20.0], false));
+        assert!((filled(&body(t)) - 2000.0).abs() < 1e-6);
+        // wall 0..3 in z, rail 2 × 4 × 5 standing on it, inside the footprint
+        let mut t = cube([0.0; 3], [20.0, 20.0, 3.0], false);
+        t.extend(cube([5.0, 8.0, 3.0], [7.0, 12.0, 8.0], false));
+        assert!((filled(&body(t)) - (1200.0 + 40.0)).abs() < 1e-6);
+        // the same with one shell oriented inwards
+        let mut t = cube([0.0; 3], [20.0, 20.0, 3.0], true);
+        t.extend(cube([5.0, 8.0, 3.0], [7.0, 12.0, 8.0], false));
+        assert!((filled(&body(t)) - 1240.0).abs() < 1e-6);
+        // a single closed box is unchanged
+        assert!((filled(&body(cube([1.0; 3], [4.0, 5.0, 6.0], false))) - 60.0).abs() < 1e-6);
     }
 }

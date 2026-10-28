@@ -1642,7 +1642,7 @@ pub fn run(
                     converged = true;
                     break;
                 }
-                if it >= 100 && steady && r[0] < 10.0 * tol {
+                if it >= 100 && steady_stop_allowed(steady, r, tol) {
                     converged = true;
                     steady_stop = true;
                     break;
@@ -1861,9 +1861,35 @@ pub fn run(
     })
 }
 
+/// Early stop of the steady iteration on settled key temperatures.
+///
+/// Settled junction/monitor/hottest temperatures alone are not enough: a
+/// slowly drifting energy field (e.g. a sealed chassis whose temperature
+/// keeps rising by a fraction of a percent per iteration) looks "settled"
+/// relative to its rise. The mass *and* energy residuals must also be within
+/// ten times the tolerance; otherwise the iteration continues and, at
+/// `max_iterations`, is reported as not converged.
+fn steady_stop_allowed(steady: bool, r: [f64; 3], tol: f64) -> bool {
+    steady && r[0] < 10.0 * tol && r[2] < 10.0 * tol
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steady_stop_needs_energy_residual() {
+        let tol = 1e-3;
+        // settled temperatures with converged residuals: stop
+        assert!(steady_stop_allowed(true, [5e-4, 1e-2, 6e-3], tol));
+        // settled temperatures but the energy field still drifting (the
+        // sealed-chassis case reported converged at 32 000 °C): continue
+        assert!(!steady_stop_allowed(true, [1e-5, 2e-3, 1.0], tol));
+        // mass not converged: continue
+        assert!(!steady_stop_allowed(true, [5e-2, 1e-3, 1e-3], tol));
+        // temperatures still moving: continue
+        assert!(!steady_stop_allowed(false, [1e-5, 1e-5, 1e-5], tol));
+    }
 
     #[test]
     fn spalding_limits() {
