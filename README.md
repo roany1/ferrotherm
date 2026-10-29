@@ -129,6 +129,7 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | Real KiCad board vs its own Gerber export | Same board, two readers | copper coverage within 0.04 %; cross-checked with gerbv |
 | Real KiCad STEP assembly (55 parts) | Pick-and-place file | 54/54 placed parts at their position |
 | Celsius EC Solver model with vertical boards (2024.36) | STEP export of the same model made by Celsius | boards, parts and CAD obstructions within 1e-3 mm |
+| Same model solved (sealed conduction-cooled chassis, 3 vertical boards, natural convection + radiation, 18 W) | Temperatures computed by Celsius EC Solver | 2R junctions U1 −1.8 K, U2 −3.1 K; block parts −0.2 … −5.8 K (FerroTherm lower); detailed die not resolved (package lumped into a block) |
 | FerroTherm STEP/IDF/STL export | Re-import (OpenCascade for STEP) | boxes recovered within 1e-4 mm |
 | KiCad board → case → solve | Power in = heat out | imbalance < 1e-6 % |
 

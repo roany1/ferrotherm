@@ -318,9 +318,13 @@ gruppi. Gli oggetti segnati "non installati" in Celsius vengono saltati.
   le emissività superficiali dei materiali Celsius; le aperture irraggiano
   verso l'ambiente.
 - I solidi CAD formati da più corpi che si toccano (pareti e guide di un
-  contenitore conduction-cooled) vengono voxelizzati correttamente: usa
-  `--shape voxel:1` (o il voxel in GUI) per un contenitore cavo, perché la
-  bounding box lo riempirebbe di alluminio.
+  contenitore conduction-cooled) vengono voxelizzati correttamente. Di
+  default l'import usa voxel da 1 mm: voxel più grossi spostano le
+  geometrie sottili (guide delle schede) e possono cambiare il risultato;
+  la bounding box riempirebbe di alluminio un contenitore cavo.
+- I componenti "Detailed" (package con die, substrato, sfere…) vengono
+  importati come un unico blocco con la potenza delle loro parti interne:
+  la temperatura del die non è risolta (il blocco ne dà una media).
 - Le schede poligonali usano il rettangolo che contiene il contorno
   (`Outline`); le dimensioni Width/Depth salvate da Celsius per queste schede
   possono essere vecchie.

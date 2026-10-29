@@ -737,8 +737,29 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
     let (cax, csign) = pose.axis(1);
     let (normal, nsign) = ft_axis(cax, csign);
     let case_up = nsign * if bottom { -1.0 } else { 1.0 } > 0.0;
-    let power = power_of(n);
+    let mut power = power_of(n);
     let level = txt(n, "Construction/Modelling_Level").unwrap_or("");
+    // A "Detailed" package keeps its power in its own parts (typically the
+    // die obstruction), not at the component level: add it, since the
+    // package is imported as one block.
+    let mut inner = Vec::new();
+    n.descendants("Solid_Obstruction", &mut inner);
+    let inner_power: f64 = inner
+        .iter()
+        .filter(|o| installed(o))
+        .map(|o| {
+            txt(o, "Cooling/Heat_Dissipated")
+                .and_then(power_w)
+                .unwrap_or(0.0)
+                * txt(o, "Cooling/Utilisation").and_then(pct).unwrap_or(1.0)
+        })
+        .sum();
+    if inner_power > 0.0 {
+        power += inner_power;
+        ctx.warnings.push(format!(
+            "component {name}: detailed package imported as one block with the {inner_power} W of its internal parts"
+        ));
+    }
     let rjc = txt(n, "Construction/Junction-to-Case_Thermal_Resistance").and_then(val);
     let rjb = txt(n, "Construction/Junction-to-Board_Thermal_Resistance").and_then(val);
     if level.eq_ignore_ascii_case("2R") && (rjc.is_some() || rjb.is_some()) {
@@ -1712,16 +1733,19 @@ impl CelsiusModel {
         case
     }
 
-    /// How CAD solids become blocks unless the user chooses: voxels of about
-    /// 1/120 of the largest model side (1–5 mm). A bounding box would fill a
-    /// hollow chassis with metal.
+    /// How CAD solids become blocks unless the user chooses: 1 mm voxels
+    /// (coarser only beyond 400 voxels on the largest side). A bounding box
+    /// would fill a hollow chassis with metal, and coarser voxels shift thin
+    /// features: on a conduction-cooled chassis 2 mm voxels moved the card
+    /// guides by 1 mm against the boards and inverted the vertical order of
+    /// the part temperatures computed by Celsius.
     pub fn default_cad_mode(&self) -> crate::step::BlockMode {
         let d = &self.case.domain;
         let big = (0..3).map(|a| d.max[a] - d.min[a]).fold(0.0, f64::max);
         if self.cad.is_empty() {
             crate::step::BlockMode::BoundingBox
         } else {
-            crate::step::BlockMode::Voxels((big / 120.0).clamp(1.0, 5.0).round())
+            crate::step::BlockMode::Voxels((big / 400.0).max(1.0))
         }
     }
 
