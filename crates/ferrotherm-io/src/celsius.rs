@@ -362,6 +362,8 @@ impl Ctx {
             power_w: power,
             emissivity,
             finish: None,
+            outline: None,
+            outline_axis: None,
         });
     }
 }
@@ -754,6 +756,40 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
                 * txt(o, "Cooling/Utilisation").and_then(pct).unwrap_or(1.0)
         })
         .sum();
+    // Detailed package: body + its internal parts (die, substrate, …) as
+    // separate blocks, so the die temperature is resolved.
+    if level.eq_ignore_ascii_case("Detailed") {
+        let parts: Vec<&XNode> = inner.iter().copied().filter(|o| installed(o)).collect();
+        if !parts.is_empty() {
+            match detailed_parts(ctx, &parts, lo, hi, &pose, ang, bottom) {
+                Ok((list, convention)) => {
+                    let mat = ctx.mat(txt(n, "Construction/MaterialLink"), "mold-compound");
+                    ctx.block_in(&pose, &name, mat, lo, hi, power);
+                    let np = list.len();
+                    for p in list {
+                        let pose_p = if p.chassis { Pose::ID } else { pose };
+                        ctx.block_in(
+                            &pose_p,
+                            &format!("{name}/{}", p.name),
+                            p.mat,
+                            p.lo,
+                            p.hi,
+                            p.power,
+                        );
+                    }
+                    ctx.warnings.push(format!(
+                        "component {name}: detailed package resolved into its body and {np} internal part(s), {inner_power} W in the parts (placement: {convention})"
+                    ));
+                    return;
+                }
+                Err(why) => {
+                    ctx.warnings.push(format!(
+                        "component {name}: detailed package lumped into one block ({why})"
+                    ));
+                }
+            }
+        }
+    }
     if inner_power > 0.0 {
         power += inner_power;
         ctx.warnings.push(format!(
@@ -801,6 +837,139 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         let mat = ctx.mat(txt(n, "Construction/MaterialLink"), "mold-compound");
         ctx.block_in(&pose, &name, mat, lo, hi, power);
     }
+}
+
+struct InnerPart {
+    name: String,
+    mat: String,
+    lo: V3,
+    hi: V3,
+    power: f64,
+    /// Box in the chassis frame (else in the board frame of the package).
+    chassis: bool,
+}
+
+/// Internal parts of a "Detailed" package as boxes. Celsius does not state
+/// the frame of their locations in the file, so three readings are tried
+/// and the first that puts every part inside the package body is used:
+/// relative to the package low corner (height from the board face), in the
+/// board frame, in the chassis frame. Fails on CAD parts, tilted parts, a
+/// rotated footprint, or when no reading fits.
+fn detailed_parts(
+    ctx: &Ctx,
+    parts: &[&XNode],
+    lo: V3,
+    hi: V3,
+    pose: &Pose,
+    ang: f64,
+    bottom: bool,
+) -> Result<(Vec<InnerPart>, &'static str), String> {
+    if ang.abs() > 1e-9 {
+        return Err("rotated footprint".into());
+    }
+    struct Raw {
+        name: String,
+        mat: String,
+        p: V3,
+        size: V3,
+        power: f64,
+    }
+    let mut raw = Vec::new();
+    for (i, o) in parts.iter().enumerate() {
+        let shape = txt(o, "Geometry/Shape").unwrap_or("Cuboid");
+        if shape.eq_ignore_ascii_case("Solid Definition") {
+            return Err("an internal part is a CAD solid".into());
+        }
+        let (r, _) = orientation(o);
+        if r != I3 {
+            return Err("an internal part is rotated".into());
+        }
+        let w = mm(o, "Geometry/Width").or_else(|| mm(o, "Geometry/Diameter"));
+        let h = mm(o, "Geometry/Height");
+        let d = mm(o, "Geometry/Depth").or_else(|| mm(o, "Geometry/Diameter"));
+        let (Some(w), Some(h), Some(d)) = (w, h, d) else {
+            return Err("an internal part has no size".into());
+        };
+        let mut p = [
+            mm(o, "Placement/X_Location").unwrap_or(0.0),
+            mm(o, "Placement/Y_Location").unwrap_or(0.0),
+            mm(o, "Placement/Z_Location").unwrap_or(0.0),
+        ];
+        if txt(o, "Placement/Origin_Point").is_some_and(|x| x.contains("Centre")) {
+            p[0] -= 0.5 * w;
+            p[2] -= 0.5 * d;
+        }
+        let mut nm = name_of(o);
+        if nm.is_empty() || nm == "?" {
+            nm = format!("part{}", i + 1);
+        }
+        raw.push(Raw {
+            name: nm,
+            mat: ctx.mat(
+                txt(o, "Cooling/MaterialLink").or_else(|| txt(o, "Construction/MaterialLink")),
+                "mold-compound",
+            ),
+            p,
+            size: [w, h, d],
+            power: txt(o, "Cooling/Heat_Dissipated")
+                .and_then(power_w)
+                .unwrap_or(0.0)
+                * txt(o, "Cooling/Utilisation").and_then(pct).unwrap_or(1.0),
+        });
+    }
+    let tol = 1e-3;
+    let inside = |a: V3, b: V3, blo: V3, bhi: V3| {
+        (0..3).all(|k| a[k] >= blo[k] - tol && b[k] <= bhi[k] + tol && b[k] - a[k] > 1e-9)
+    };
+    let build = |f: &dyn Fn(&Raw) -> (V3, V3), chassis: bool| -> Vec<InnerPart> {
+        raw.iter()
+            .map(|r| {
+                let (a, b) = f(r);
+                InnerPart {
+                    name: r.name.clone(),
+                    mat: r.mat.clone(),
+                    lo: a,
+                    hi: b,
+                    power: r.power,
+                    chassis,
+                }
+            })
+            .collect()
+    };
+    // 1. relative to the package low corner, height from the board face
+    let rel = |r: &Raw| -> (V3, V3) {
+        let (y0, y1) = if bottom {
+            (hi[1] - r.p[1] - r.size[1], hi[1] - r.p[1])
+        } else {
+            (lo[1] + r.p[1], lo[1] + r.p[1] + r.size[1])
+        };
+        (
+            [lo[0] + r.p[0], y0, lo[2] + r.p[2]],
+            [lo[0] + r.p[0] + r.size[0], y1, lo[2] + r.p[2] + r.size[2]],
+        )
+    };
+    let cands = build(&rel, false);
+    if cands.iter().all(|c| inside(c.lo, c.hi, lo, hi)) {
+        return Ok((cands, "relative to the package corner"));
+    }
+    // 2. board frame
+    let abs = |r: &Raw| -> (V3, V3) {
+        (
+            r.p,
+            [r.p[0] + r.size[0], r.p[1] + r.size[1], r.p[2] + r.size[2]],
+        )
+    };
+    let cands = build(&abs, false);
+    if cands.iter().all(|c| inside(c.lo, c.hi, lo, hi)) {
+        return Ok((cands, "board frame"));
+    }
+    // 3. chassis frame
+    let (clo, chi) = pose.bx(lo, hi);
+    let cands = build(&abs, true);
+    if cands.iter().all(|c| inside(c.lo, c.hi, clo, chi)) {
+        return Ok((cands, "chassis frame"));
+    }
+    Err("internal parts do not fit the package in any known frame".into())
 }
 
 fn heatsink(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
@@ -940,6 +1109,7 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
     // footprint in the board plane (local x, z)
     let mut fx = [0.0, mm(n, "Geometry/Width").unwrap_or(100.0)];
     let mut fz = [0.0, mm(n, "Geometry/Depth").unwrap_or(100.0)];
+    let mut poly: Vec<[f64; 2]> = vec![];
     if let Some(s) = txt(n, "Geometry/Shape") {
         if !s.eq_ignore_ascii_case("Rectangle") {
             // Width/Depth of a polygon board can be stale: the outline is the
@@ -952,10 +1122,12 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
                     fx = [fx[0].min(p[0]), fx[1].max(p[0])];
                     fz = [fz[0].min(p[1]), fz[1].max(p[1])];
                 }
+                poly = pts;
+            } else {
+                ctx.warnings.push(format!(
+                    "PCB {name}: shape '{s}' without a readable outline, imported as a rectangle"
+                ));
             }
-            ctx.warnings.push(format!(
-                "PCB {name}: shape '{s}' imported as the bounding rectangle of its outline"
-            ));
         }
     }
     let mut y = mm(n, "Placement/Y_Location").unwrap_or(0.0);
@@ -1043,6 +1215,21 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
     let (lo, hi) = pose.bx([fx[0], 0.0, fz[0]], [fx[1], t, fz[1]]);
     let (a, b) = ctx.f.bx(lo, hi);
     let bname = ctx.unique(&name);
+    // polygon outline mapped to the FerroTherm in-plane axes of the normal
+    let outline = if poly.is_empty() {
+        None
+    } else {
+        let tg = ferrotherm_core::model::tangential(normal);
+        let ring: Vec<[f64; 2]> = poly
+            .iter()
+            .map(|q| {
+                let w = ctx.f.p(pose.apply([q[0], 0.0, q[1]]));
+                [w[tg[0]], w[tg[1]]]
+            })
+            .collect();
+        Some(vec![ring])
+    };
+    let outline_axis = outline.as_ref().map(|_| AXIS_NAME[normal].to_string());
     ctx.case.blocks.push(Block {
         name: bname,
         material: None,
@@ -1052,6 +1239,8 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
         power_w: power,
         emissivity: txt(n, "Construction/Top_Surface_Emissivity").and_then(val),
         finish: None,
+        outline,
+        outline_axis,
     });
     let board = BoardRef { pose, t };
     for (list, item) in [
@@ -1544,6 +1733,13 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
                 {
                     t if t.contains("laminar") => fs.turbulence = Turbulence::Laminar,
                     t if t.contains("lvel") => fs.turbulence = Turbulence::Lvel,
+                    t if t.contains("epsilon")
+                        || t.contains("k-e")
+                        || t.contains("k_e")
+                        || t == "ke" =>
+                    {
+                        fs.turbulence = Turbulence::KEpsilon
+                    }
                     t => {
                         fs.turbulence = Turbulence::Lvel;
                         ctx.warnings.push(format!(
@@ -1727,6 +1923,8 @@ impl CelsiusModel {
                     power_w: if vol > 0.0 { c.power_w * v / vol } else { 0.0 },
                     emissivity: c.emissivity,
                     finish: None,
+                    outline: None,
+                    outline_axis: None,
                 });
             }
         }
@@ -1901,6 +2099,144 @@ mod tests {
         let text = c.to_toml().unwrap();
         let back = Case::from_toml(&text).unwrap();
         assert_eq!(back.materials.len(), c.materials.len());
+    }
+
+    /// U1 turned into a "Detailed" package with a substrate and a 1.5 W die.
+    fn detailed_model(sub_at: &str, die_at: &str) -> String {
+        MODEL.replace(
+            "<Construction><Modelling_Level>2R</Modelling_Level><Junction-to-Case_Thermal_Resistance>5 K/W</Junction-to-Case_Thermal_Resistance><Junction-to-Board_Thermal_Resistance>10 C/W</Junction-to-Board_Thermal_Resistance></Construction>",
+            &format!(
+                "<Construction><Modelling_Level>Detailed</Modelling_Level></Construction>\
+                 <Solid_Obstructions>\
+                 <Solid_Obstruction><Identification><Name>substrate</Name></Identification><Geometry><Shape>Cuboid</Shape><Width>10 mm</Width><Height>0.4 mm</Height><Depth>6 mm</Depth></Geometry>\
+                 <Placement><Origin_Point>Low Corner</Origin_Point>{sub_at}</Placement>\
+                 <Cooling><MaterialLink>13-1</MaterialLink></Cooling></Solid_Obstruction>\
+                 <Solid_Obstruction><Identification><Name>die</Name></Identification><Geometry><Shape>Cuboid</Shape><Width>4 mm</Width><Height>0.5 mm</Height><Depth>2 mm</Depth></Geometry>\
+                 <Placement><Origin_Point>Low Corner</Origin_Point>{die_at}</Placement>\
+                 <Cooling><Heat_Dissipated>1.5 W</Heat_Dissipated></Cooling></Solid_Obstruction>\
+                 </Solid_Obstructions>"
+            ),
+        )
+    }
+
+    /// Detailed package resolved: body, substrate and die as separate
+    /// blocks, the die carrying its own power, whichever frame its location
+    /// is written in (package corner or board frame).
+    #[test]
+    fn detailed_package_resolved() {
+        let loc = |x: f64, y: f64, z: f64| {
+            format!("<X_Location>{x} mm</X_Location><Y_Location>{y} mm</Y_Location><Z_Location>{z} mm</Z_Location>")
+        };
+        // package low corner in the board frame: (50, 1.6, 40)
+        let cases = [
+            (loc(0.0, 0.0, 0.0), loc(3.0, 0.4, 2.0), "package corner"),
+            (loc(50.0, 1.6, 40.0), loc(53.0, 2.0, 42.0), "board frame"),
+        ];
+        for (sub_at, die_at, conv) in cases {
+            let m = read(&container(&detailed_model(&sub_at, &die_at))).unwrap();
+            let c = &m.case;
+            assert!(c.components.iter().all(|x| x.name != "U1"));
+            let body = c.blocks.iter().find(|b| b.name == "U1").unwrap();
+            let sub = c.blocks.iter().find(|b| b.name == "U1/substrate").unwrap();
+            let die = c.blocks.iter().find(|b| b.name == "U1/die").unwrap();
+            assert!(
+                m.warnings
+                    .iter()
+                    .any(|w| w.contains("resolved") && w.contains(conv)),
+                "{:?}",
+                m.warnings
+            );
+            // body: x 60..70, y 99..105, z 21.6..23.6 (as the 2R part)
+            let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+            assert!(close(body.min[0], 60.0) && close(body.max[2], 23.6));
+            assert_eq!(body.power_w, 2.0);
+            // substrate on the board face
+            assert!(close(sub.min[2], 21.6) && close(sub.max[2], 22.0));
+            // die: board-frame x 53..57, height 2.0..2.5 above the board face
+            // (+1.6 board), depth 42..44 → y = 150 − (5 + 44 … 5 + 42)
+            assert!(
+                close(die.min[0], 63.0) && close(die.max[0], 67.0),
+                "{:?}",
+                die
+            );
+            assert!(close(die.min[1], 101.0) && close(die.max[1], 103.0));
+            assert!(close(die.min[2], 22.0) && close(die.max[2], 22.5));
+            assert_eq!(die.power_w, 1.5);
+            // later blocks own the cells: body painted first
+            let ib = c.blocks.iter().position(|b| b.name == "U1").unwrap();
+            let id = c.blocks.iter().position(|b| b.name == "U1/die").unwrap();
+            assert!(ib < id);
+        }
+    }
+
+    /// The resolved die runs hotter than the package body around it
+    /// (conduction only, so the check is quick).
+    #[test]
+    fn detailed_package_solves() {
+        let at = |x: f64, y: f64, z: f64| {
+            format!("<X_Location>{x} mm</X_Location><Y_Location>{y} mm</Y_Location><Z_Location>{z} mm</Z_Location>")
+        };
+        let m = read(&container(&detailed_model(
+            &at(0.0, 0.0, 0.0),
+            &at(3.0, 0.4, 2.0),
+        )))
+        .unwrap();
+        let mut case = m.case.clone();
+        case.flow = None;
+        case.grid.max_cell_mm = ferrotherm_core::case::MaybeVec3::Scalar(5.0);
+        let lib = ferrotherm_core::model::load_library(&case, std::path::Path::new(".")).unwrap();
+        let sim = ferrotherm_core::Simulation::with_library(case, lib).unwrap();
+        let out = sim.run(|_| {}).unwrap();
+        let get = |n: &str| {
+            out.report
+                .blocks
+                .iter()
+                .find(|b| b.name == n)
+                .unwrap()
+                .clone()
+        };
+        let (die, body) = (get("U1/die"), get("U1"));
+        eprintln!(
+            "DETAILED: die {:.2} °C, body max {:.2} °C",
+            die.t_max_c, body.t_max_c
+        );
+        assert!(die.t_max_c > body.t_avg_c);
+        assert!(out.report.energy_imbalance_pct.abs() < 0.01);
+    }
+
+    /// Internal parts that fit no frame: one block with the total power.
+    #[test]
+    fn detailed_package_fallback() {
+        let at = "<X_Location>0 mm</X_Location><Y_Location>0 mm</Y_Location><Z_Location>0 mm</Z_Location>";
+        let far = "<X_Location>500 mm</X_Location><Y_Location>0 mm</Y_Location><Z_Location>0 mm</Z_Location>";
+        let m = read(&container(&detailed_model(at, far))).unwrap();
+        let u1 = m.case.blocks.iter().find(|b| b.name == "U1").unwrap();
+        assert!((u1.power_w - 3.5).abs() < 1e-12);
+        assert!(m.case.blocks.iter().all(|b| b.name != "U1/die"));
+        assert!(m.warnings.iter().any(|w| w.contains("lumped")));
+    }
+
+    /// Polygon board: the outline is kept (mapped to the FerroTherm in-plane
+    /// axes) and the box is its bounding rectangle.
+    #[test]
+    fn polygon_board() {
+        let model = MODEL.replace(
+            "<Geometry><Shape>Rectangle</Shape><Thickness>1.6 mm</Thickness><Width>100 mm</Width><Depth>80 mm</Depth></Geometry>",
+            "<Geometry><Shape>Polygon</Shape><Thickness>1.6 mm</Thickness><Width>1 mm</Width><Depth>1 mm</Depth><Outline>0,0,100,0,100,40,50,40,50,80,0,80</Outline></Geometry>",
+        );
+        let m = read(&container(&model)).unwrap();
+        let b = m.case.blocks.iter().find(|b| b.name == "BOARD").unwrap();
+        // box as the rectangular board of the synthetic model
+        assert_eq!(b.min, [10.0, 65.0, 20.0]);
+        assert_eq!(b.max[0], 110.0);
+        assert_eq!(b.max[1], 145.0);
+        assert_eq!(b.outline_axis.as_deref(), Some("z"));
+        // local (x, z) → FerroTherm (10 + x, 150 − (5 + z))
+        assert!(b.outline_contains(10.0 + 75.0, 145.0 - 20.0));
+        assert!(!b.outline_contains(10.0 + 75.0, 145.0 - 60.0), "notch");
+        assert!(b.outline_contains(10.0 + 25.0, 145.0 - 60.0));
+        let back = Case::from_toml(&m.case.to_toml().unwrap()).unwrap();
+        assert!(back.blocks.iter().any(|x| x.outline.is_some()));
     }
 
     /// A vertical board as in the reference model (Celsius 2024.36, checked

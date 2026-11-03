@@ -16,7 +16,14 @@ use ferrotherm_core::model::{all_blocks, component_box};
 pub fn case_boxes(case: &Case, lib: &Library) -> Result<Vec<(String, V3, V3)>, String> {
     let mut out = Vec::new();
     for (b, _) in all_blocks(case).map_err(|e| e.to_string())? {
-        out.push((b.name.clone(), b.min, b.max));
+        let boxes = b.outline_boxes().map_err(|e| e.to_string())?;
+        if boxes.len() == 1 {
+            out.push((b.name.clone(), boxes[0].0, boxes[0].1));
+        } else {
+            for (i, (lo, hi)) in boxes.into_iter().enumerate() {
+                out.push((format!("{}/{}", b.name, i + 1), lo, hi));
+            }
+        }
     }
     for c in &case.components {
         let (lo, hi) = component_box(c, lib).map_err(|e| e.to_string())?;
@@ -63,12 +70,18 @@ pub fn case_to_idf(case: &Case, lib: &Library) -> Result<(String, String), Strin
         }
     }
     let thickness = hi[2] - lo[2];
-    let outline = vec![
-        [lo[0], lo[1]],
-        [hi[0], lo[1]],
-        [hi[0], hi[1]],
-        [lo[0], hi[1]],
-    ];
+    // a single polygon board keeps its outline and cut-outs
+    let rings: Vec<Vec<[f64; 2]>> = match pcbs.as_slice() {
+        [(b, _)] if b.outline.is_some() && b.outline_normal().ok() == Some(2) => {
+            b.outline.clone().unwrap_or_default()
+        }
+        _ => vec![vec![
+            [lo[0], lo[1]],
+            [hi[0], lo[1]],
+            [hi[0], hi[1]],
+            [lo[0], hi[1]],
+        ]],
+    };
     let tol = 1e-6;
     let mut parts = Vec::new();
     let mut push = |name: &str, package: &str, a: V3, b: V3| {
@@ -112,5 +125,5 @@ pub fn case_to_idf(case: &Case, lib: &Library) -> Result<(String, String), Strin
     } else {
         &case.meta.title
     };
-    Ok(crate::idf::write(name, &outline, thickness, &parts))
+    Ok(crate::idf::write_rings(name, &rings, thickness, &parts))
 }

@@ -302,12 +302,25 @@ pub struct IdfPart {
 }
 
 pub fn write(name: &str, outline: &[P2], thickness: f64, parts: &[IdfPart]) -> (String, String) {
+    write_rings(name, &[outline.to_vec()], thickness, parts)
+}
+
+/// As [`write`], with several outline loops: the first is the board edge,
+/// the others cut-outs (loop labels 1, 2, …).
+pub fn write_rings(
+    name: &str,
+    rings: &[Vec<P2>],
+    thickness: f64,
+    parts: &[IdfPart],
+) -> (String, String) {
     let date = "2026/01/01.00:00:00";
     let mut emn = format!(
         ".HEADER\nBOARD_FILE 3.0 \"FerroTherm (Roany Romano)\" {date} 1\n\"{name}\" MM\n.END_HEADER\n.BOARD_OUTLINE MCAD\n{thickness:.4}\n"
     );
-    for p in outline.iter().chain(outline.first()) {
-        emn += &format!("0 {:.4} {:.4} 0\n", p[0], p[1]);
+    for (l, outline) in rings.iter().enumerate() {
+        for p in outline.iter().chain(outline.first()) {
+            emn += &format!("{l} {:.4} {:.4} 0\n", p[0], p[1]);
+        }
     }
     emn += ".END_BOARD_OUTLINE\n.PLACEMENT\n";
     let mut emp =

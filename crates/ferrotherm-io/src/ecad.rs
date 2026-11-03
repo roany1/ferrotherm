@@ -386,9 +386,22 @@ pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
                 Some(o) => o.coverage(tlo, thi),
                 None => 1.0,
             };
-            if inside < 0.5 {
+            if inside < 1e-3 {
                 continue;
             }
+            // exact board shape: the tile keeps only the cells inside the
+            // outline (cut-outs and non-rectangular edges)
+            let tile_outline = if board.outline.is_empty() || inside > 0.999_999 {
+                None
+            } else {
+                Some(
+                    board
+                        .outline
+                        .iter()
+                        .map(|r| r.iter().map(|q| [q[0] + off[0], q[1] + off[1]]).collect())
+                        .collect::<Vec<Vec<[f64; 2]>>>(),
+                )
+            };
             let layers: Vec<CopperLayer> = coppers
                 .iter()
                 .map(|(t, r)| CopperLayer {
@@ -438,6 +451,8 @@ pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
                 power_w: 0.0,
                 emissivity: None,
                 finish: Some("pcb-soldermask".into()),
+                outline_axis: tile_outline.as_ref().map(|_| "z".to_string()),
+                outline: tile_outline,
             });
         }
     }
@@ -501,6 +516,8 @@ pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
                     power_w: power,
                     emissivity: Some(0.9),
                     finish: None,
+                    outline: None,
+                    outline_axis: None,
                 });
             }
         }

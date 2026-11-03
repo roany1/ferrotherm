@@ -9,6 +9,7 @@ use eframe::egui::{
     self, Color32, ComboBox, DragValue, Grid, Pos2, RichText, Sense, Stroke, Ui, Vec2,
 };
 use ferrotherm_core::library::Library;
+use ferrotherm_io::defeature::{DefeatureOptions, DefeatureReport};
 use ferrotherm_io::ecad::{self, Board, BoardSummary, ComponentMode, Fragment, ToCaseOptions};
 use ferrotherm_io::import::{self, Imported, McadOptions, Source};
 use ferrotherm_io::step::{BlockMode, StepModel};
@@ -53,9 +54,60 @@ pub struct ImportDialog {
     offset: [f64; 3],
     min_volume: f64,
     detect_pcb: bool,
+    // defeaturing (STEP)
+    defeat: Defeat,
     // common
     prefix: String,
     fit: bool,
+}
+
+type DefeatJob = Receiver<Result<(String, StepModel, DefeatureReport), String>>;
+
+/// The STEP defeaturing editor of the import dialog.
+struct Defeat {
+    open: bool,
+    holes: (bool, f64),
+    bosses: (bool, f64),
+    fillets: (bool, f64),
+    chamfers: (bool, f64),
+    small: (bool, f64),
+    boxes: (bool, f64),
+    job: Option<DefeatJob>,
+    /// Simplified STEP text and its report (applied to the model).
+    done: Option<(String, DefeatureReport)>,
+    error: Option<String>,
+}
+
+impl Default for Defeat {
+    fn default() -> Self {
+        Defeat {
+            open: false,
+            holes: (true, 10.0),
+            bosses: (false, 8.0),
+            fillets: (true, 3.0),
+            chamfers: (true, 2.0),
+            small: (false, 50.0),
+            boxes: (false, 0.9),
+            job: None,
+            done: None,
+            error: None,
+        }
+    }
+}
+
+impl Defeat {
+    fn options(&self) -> DefeatureOptions {
+        let on = |x: (bool, f64)| (x.0 && x.1 > 0.0).then_some(x.1);
+        DefeatureOptions {
+            hole_max_diameter_mm: on(self.holes),
+            boss_max_diameter_mm: on(self.bosses),
+            fillet_max_radius_mm: on(self.fillets),
+            chamfer_max_width_mm: on(self.chamfers),
+            small_part_max_volume_mm3: on(self.small),
+            box_fill_ratio: on(self.boxes),
+            unify: true,
+        }
+    }
 }
 
 pub fn file_filters(d: rfd::FileDialog) -> rfd::FileDialog {
@@ -111,6 +163,7 @@ impl ImportDialog {
             offset: [0.0; 3],
             min_volume: 0.0,
             detect_pcb: true,
+            defeat: Defeat::default(),
             prefix: String::new(),
             fit: true,
         }
@@ -443,7 +496,166 @@ impl ImportDialog {
         out
     }
 
+    /// Defeaturing editor (STEP only): options, run in the background,
+    /// replace the model with the simplified one, save it.
+    fn defeat_ui(&mut self, ui: &mut Ui) {
+        // finished job?
+        if let Some(rx) = &self.defeat.job {
+            if let Ok(r) = rx.try_recv() {
+                self.defeat.job = None;
+                match r {
+                    Ok((text, model, rep)) => {
+                        if let State::Mcad(_, m) = &mut self.state {
+                            **m = model;
+                        }
+                        self.defeat.done = Some((text, rep));
+                        self.defeat.error = None;
+                    }
+                    Err(e) => self.defeat.error = Some(e),
+                }
+            }
+        }
+        let src_path = self.path.clone();
+        let d = &mut self.defeat;
+        let busy = d.job.is_some();
+        egui::CollapsingHeader::new(RichText::new("Simplify geometry (defeaturing)").strong())
+            .id_salt("defeat")
+            .default_open(d.open)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Removes features on the exact CAD solids (OpenCascade) before the \
+                         blocks are made: fewer, larger cells and no air in screw holes.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                Grid::new("defeat_opts")
+                    .num_columns(2)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        let row = |ui: &mut Ui, x: &mut (bool, f64), label: &str, suffix: &str, tip: &str| {
+                            ui.checkbox(&mut x.0, label).on_hover_text(tip);
+                            ui.add_enabled(
+                                x.0,
+                                DragValue::new(&mut x.1)
+                                    .speed(0.1)
+                                    .range(0.0..=1e9)
+                                    .prefix("≤ ")
+                                    .suffix(suffix),
+                            );
+                            ui.end_row();
+                        };
+                        row(ui, &mut d.holes, "Close holes", " mm Ø",
+                            "Through, blind, countersunk and counterbored holes up to this diameter");
+                        row(ui, &mut d.bosses, "Remove bosses / pins", " mm Ø",
+                            "Cylindrical bosses, pins and (hollow) standoffs up to this diameter");
+                        row(ui, &mut d.fillets, "Remove fillets", " mm R",
+                            "Fillets and rounds (cylindrical and toroidal) up to this radius");
+                        row(ui, &mut d.chamfers, "Remove chamfers", " mm",
+                            "Inclined chamfer faces up to this width");
+                        row(ui, &mut d.small, "Drop small parts", " mm³",
+                            "Whole parts up to this volume: screws, nuts, washers, rivets");
+                        ui.checkbox(&mut d.boxes.0, "Box nearly-box parts")
+                            .on_hover_text("Replace a part by its bounding box when it fills at least this fraction of it");
+                        ui.add_enabled(
+                            d.boxes.0,
+                            DragValue::new(&mut d.boxes.1)
+                                .speed(0.01)
+                                .range(0.1..=1.0)
+                                .prefix("fill ≥ "),
+                        );
+                        ui.end_row();
+                    });
+                ui.horizontal(|ui| {
+                    let run = ui.add_enabled(!busy, egui::Button::new("Simplify"));
+                    if run.clicked() {
+                        let path = src_path.clone();
+                        let opt = d.options();
+                        let (tx, rx) = channel();
+                        let ctx = ui.ctx().clone();
+                        std::thread::spawn(move || {
+                            let r = std::panic::catch_unwind(|| -> Result<_, String> {
+                                let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                                let (out, rep) = ferrotherm_io::defeature::defeature_step(&text, &opt)?;
+                                let model = ferrotherm_io::step::read(&out, 0.1)?;
+                                Ok((out, model, rep))
+                            })
+                            .unwrap_or_else(|_| Err("the defeaturing crashed on this file".into()));
+                            let _ = tx.send(r);
+                            ctx.request_repaint();
+                        });
+                        d.job = Some(rx);
+                        d.error = None;
+                    }
+                    if busy {
+                        ui.spinner();
+                        ui.label(RichText::new("simplifying…").weak());
+                    }
+                    if let Some((text, _)) = &d.done {
+                        if ui.button("Save simplified STEP…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("STEP", &["step", "stp"])
+                                .set_file_name("simplified.step")
+                                .save_file()
+                            {
+                                if let Err(e) = std::fs::write(&p, text) {
+                                    d.error = Some(e.to_string());
+                                }
+                            }
+                        }
+                    }
+                });
+                if let Some(e) = &d.error {
+                    ui.colored_label(ERR, e);
+                }
+                if let Some((_, rep)) = &d.done {
+                    ui.label(RichText::new(rep.summary()).small());
+                    egui::ScrollArea::vertical()
+                        .id_salt("defeat_parts")
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            Grid::new("defeat_rep").striped(true).spacing([10.0, 2.0]).show(ui, |ui| {
+                                for h in ["Part", "×", "Holes", "Bosses", "Fillets", "Chamfers", "Faces", "Volume mm³"] {
+                                    ui.label(RichText::new(h).weak().small());
+                                }
+                                ui.end_row();
+                                for p in &rep.parts {
+                                    ui.label(RichText::new(&p.name).small());
+                                    ui.label(RichText::new(p.instances.to_string()).small());
+                                    if p.removed {
+                                        ui.label(RichText::new("dropped").small().color(WARN));
+                                        for _ in 0..5 {
+                                            ui.label("");
+                                        }
+                                        ui.end_row();
+                                        continue;
+                                    }
+                                    for v in [p.holes, p.bosses, p.fillets, p.chamfers] {
+                                        ui.label(RichText::new(v.to_string()).small());
+                                    }
+                                    ui.label(RichText::new(format!("{} → {}", p.faces_before, p.faces_after)).small());
+                                    let mut t = format!("{:.0} → {:.0}", p.volume_before_mm3, p.volume_after_mm3);
+                                    if p.boxed {
+                                        t += " (box)";
+                                    }
+                                    if p.skipped > 0 {
+                                        t += &format!(" · {} kept", p.skipped);
+                                    }
+                                    ui.label(RichText::new(t).small());
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                }
+            });
+    }
+
     fn mcad_ui(&mut self, ui: &mut Ui, lib: &Library, domain_min: [f64; 3]) -> Option<Action> {
+        if matches!(&self.state, State::Mcad(Source::Step, _)) {
+            self.defeat_ui(ui);
+            ui.separator();
+        }
         let State::Mcad(src, m) = &self.state else {
             return None;
         };

@@ -518,6 +518,37 @@ pub fn block(ui: &mut Ui, b: &mut Block, lib: &Library, idx: usize) {
         num_min(ui, &mut b.power_w, 0.01, 0.0, " W")
             .on_hover_text("Uniform heat load of the whole block");
         ui.end_row();
+        if let Some(rings) = &b.outline {
+            ui.label("Outline");
+            let pts: usize = rings.iter().map(|r| r.len()).sum();
+            let normal = b
+                .outline_normal()
+                .map(|a| ["x", "y", "z"][a])
+                .unwrap_or("?");
+            let mut remove = false;
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{} ring(s), {pts} points, normal {normal}",
+                    rings.len()
+                ))
+                .on_hover_text(
+                    "Polygon shape of the block: only the cells inside the rings \
+                     belong to it (holes allowed). Edit the rings in the case file.",
+                );
+                if ui
+                    .small_button("Remove")
+                    .on_hover_text("Use the full box instead of the outline")
+                    .clicked()
+                {
+                    remove = true;
+                }
+            });
+            if remove {
+                b.outline = None;
+                b.outline_axis = None;
+            }
+            ui.end_row();
+        }
     });
     if let Some(stack) = &mut b.pcb {
         ui.add_space(8.0);

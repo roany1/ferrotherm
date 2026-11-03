@@ -116,7 +116,7 @@ pub fn flow_settings(ui: &mut Ui, f: &mut Option<FlowSettings>, fill: &mut Strin
         RichText::new(
             "Finite-volume Navier–Stokes (SIMPLEC, staggered grid) with Boussinesq buoyancy and \
              conjugate heat transfer: the fluid is the domain fill, blocks are solids. Turbulence: \
-             LVEL (algebraic, for electronics) or laminar.",
+             LVEL (algebraic, for electronics), k–ε with wall functions or laminar.",
         )
         .weak(),
     );
@@ -131,15 +131,29 @@ pub fn flow_settings(ui: &mut Ui, f: &mut Option<FlowSettings>, fill: &mut Strin
             .selected_text(match s.turbulence {
                 Turbulence::Lvel => "LVEL",
                 Turbulence::Laminar => "Laminar",
+                Turbulence::KEpsilon => "k–ε",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut s.turbulence, Turbulence::Lvel, "LVEL")
                     .on_hover_text(
                         "Algebraic model with wall distance and Spalding's law of the wall",
                     );
+                ui.selectable_value(&mut s.turbulence, Turbulence::KEpsilon, "k–ε")
+                    .on_hover_text(
+                        "Standard k–ε with log-law wall functions: forced flows with \
+                         fans/inlets; the wall cells should be in the log layer (y* 30–300)",
+                    );
                 ui.selectable_value(&mut s.turbulence, Turbulence::Laminar, "Laminar");
             });
         ui.end_row();
+        if s.turbulence == Turbulence::KEpsilon {
+            ui.label("Inflow turbulence intensity");
+            let mut pct = s.turbulence_intensity * 100.0;
+            if num(ui, &mut pct, 0.5, " %").changed() {
+                s.turbulence_intensity = (pct / 100.0).clamp(0.001, 0.5);
+            }
+            ui.end_row();
+        }
         ui.label("Convection scheme");
         ComboBox::from_id_salt("scheme")
             .selected_text(match s.scheme {

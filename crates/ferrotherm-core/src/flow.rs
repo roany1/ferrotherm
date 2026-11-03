@@ -15,6 +15,14 @@
 //! * Turbulence: laminar or LVEL (wall distance from ∇²φ = −1,
 //!   L = √(|∇φ|² + 2φ) − |∇φ|; ν_t from Spalding's law of the wall,
 //!   κ = 0.41, E = 8.6).
+//! * Turbulence k–ε: standard model (Launder & Spalding 1974; C_μ = 0.09,
+//!   C₁ = 1.44, C₂ = 1.92, σ_k = 1.0, σ_ε = 1.3) with buoyancy production
+//!   G_b = β g·∇T μ_t/Pr_t (C₃ = tanh|v_∥/v_⊥|), equilibrium wall functions
+//!   for momentum (log law, κ = 0.41, E = 9.793) and heat (Jayatilleke P
+//!   function); the wall cells fix ε = C_μ^¾ k^{3/2}/(κ y) and take the
+//!   wall production τ_w C_μ^¼ √k/(κ y). Scalable form (Grotjans & Menter
+//!   1998): y* is limited to ≥ 11.225, so coarse electronics grids keep the
+//!   log-law shear and heat transfer.
 //! * Energy: conduction everywhere + advection in the fluid, k_eff = k + ρ c_p ν_t / Pr_t.
 
 use crate::case::{BoundaryKind, Case, Face, FlowSettings, Mode, Scheme, Turbulence};
@@ -30,6 +38,19 @@ const MM: f64 = 1e-3;
 const PR_T: f64 = 0.9;
 const KAPPA: f64 = 0.41;
 const E_WALL: f64 = 8.6;
+
+// standard k–ε
+const C_MU: f64 = 0.09;
+const C1_E: f64 = 1.44;
+const C2_E: f64 = 1.92;
+const SIGMA_K: f64 = 1.0;
+const SIGMA_E: f64 = 1.3;
+/// Log-law constant of the k–ε wall functions (smooth wall).
+const E_LOG: f64 = 9.793;
+/// y* where the linear and log profiles intersect.
+const YSTAR_LAM: f64 = 11.225;
+const K_MIN: f64 = 1e-10;
+const EPS_MIN: f64 = 1e-14;
 
 const WALL: u8 = 0;
 const ACTIVE: u8 = 1;
@@ -180,6 +201,30 @@ struct State {
     t: Vec<f64>,
     ts: Vec<f64>,
     nut: Vec<f64>,
+    /// k–ε: turbulent kinetic energy (m²/s²) and dissipation (m²/s³) per cell.
+    k: Vec<f64>,
+    eps: Vec<f64>,
+    /// k–ε wall functions per cell and axis: effective viscosity (Pa·s) and
+    /// conductivity (W/m/K) across the half cell to a wall normal to that
+    /// axis; 0 where there is no wall.
+    muw: Vec<[f64; 3]>,
+    kw: Vec<[f64; 3]>,
+}
+
+impl State {
+    fn copy(&self) -> State {
+        State {
+            u: self.u.clone(),
+            p: self.p.clone(),
+            t: self.t.clone(),
+            ts: self.ts.clone(),
+            nut: self.nut.clone(),
+            k: self.k.clone(),
+            eps: self.eps.clone(),
+            muw: self.muw.clone(),
+            kw: self.kw.clone(),
+        }
+    }
 }
 
 struct Solver<'a> {
@@ -213,6 +258,15 @@ struct Solver<'a> {
     pins: Vec<usize>,
     s2s: Option<&'a S2s>,
     monitors: Vec<(String, [f64; 3], usize)>,
+    /// k–ε active.
+    ke: bool,
+    /// Distance from the cell centre to a no-slip wall normal to each axis
+    /// (half the cell width), 0 where the cell has no such wall.
+    wall_y: Vec<[f64; 3]>,
+    /// Molecular conductivity of the flowing fluid, W/(m K).
+    k_mol: f64,
+    /// Turbulent length scale of the inflow per case boundary, m.
+    bnd_len: Vec<f64>,
 }
 
 impl<'a> Solver<'a> {
@@ -246,6 +300,10 @@ impl<'a> Solver<'a> {
             ));
         };
         let mat = &m.materials[fm as usize];
+        let k_mol = (0..nc)
+            .find(|&c| fluid[c])
+            .map(|c| m.k[c][0])
+            .unwrap_or(0.026);
         let props = Props {
             rho: mat.density,
             mu: mat.viscosity.unwrap_or(1.8e-5),
@@ -524,6 +582,10 @@ impl<'a> Solver<'a> {
             pins: vec![],
             s2s,
             monitors,
+            ke: false,
+            wall_y: vec![],
+            k_mol,
+            bnd_len: vec![],
         };
         s.d_open = [
             vec![0.0; s.kind[0].len()],
@@ -533,6 +595,10 @@ impl<'a> Solver<'a> {
         s.find_pins()?;
         if s.cfg.turbulence == Turbulence::Lvel {
             s.wall_distance()?;
+        }
+        if s.cfg.turbulence == Turbulence::KEpsilon {
+            s.ke = true;
+            s.ke_setup(case);
         }
         Ok(s)
     }
@@ -757,6 +823,451 @@ impl<'a> Solver<'a> {
         self.props.mu + self.props.rho * st.nut[c]
     }
 
+    /// Is the side `hi` of fluid cell `c` (at `p`) along axis `a` a no-slip
+    /// wall (a solid cell or a closed domain face)?
+    fn is_wall(&self, c: usize, p: [usize; 3], a: usize, hi: bool) -> bool {
+        let n = self.n;
+        let st = [1usize, n[0], n[0] * n[1]];
+        let inner = if hi { p[a] + 1 < n[a] } else { p[a] > 0 };
+        if inner {
+            let nb = if hi { c + st[a] } else { c - st[a] };
+            return !self.fluid[nb];
+        }
+        let mut pf = p;
+        if hi {
+            pf[a] += 1;
+        }
+        let f = fidx(self.fd[a], pf);
+        if matches!(self.kind[a][f], OPENING | FIXED) {
+            return false;
+        }
+        !matches!(self.wall_kind(a, p, hi), Some(BoundaryKind::Symmetry))
+    }
+
+    /// k–ε geometry: wall distances of the wall cells and inflow length scales.
+    fn ke_setup(&mut self, case: &Case) {
+        let g = &self.m.grid;
+        let nc = self.m.ncells;
+        let mut wy = vec![[0.0; 3]; nc];
+        for (c, w) in wy.iter_mut().enumerate() {
+            if !self.fluid[c] {
+                continue;
+            }
+            let p = g.ijk(c);
+            for a in 0..3 {
+                if self.is_wall(c, p, a, false) || self.is_wall(c, p, a, true) {
+                    w[a] = 0.5 * g.width(a, p[a]);
+                }
+            }
+        }
+        self.wall_y = wy;
+        // length scale 0.07 √A of each boundary (fully developed duct ~ 0.07 D_h)
+        let mut area = vec![0.0; case.boundaries.len()];
+        for a in 0..3 {
+            for f in 0..self.kind[a].len() {
+                let bi = self.face_bnd[a][f];
+                if bi >= 0 && matches!(self.kind[a][f], OPENING | FIXED) {
+                    area[bi as usize] += face_area(self.m, self.fd[a], a, f);
+                }
+            }
+        }
+        self.bnd_len = area.iter().map(|x| 0.07 * x.sqrt().max(1e-3)).collect();
+    }
+
+    /// Initial k and ε: intensity of the largest imposed velocity (at least
+    /// 0.2 m/s) and a length scale of 7 % of the smallest domain size.
+    fn ke_initial(&self) -> (f64, f64) {
+        let mut u = 0.2f64;
+        for a in 0..3 {
+            for (f, v) in self.fixed_u[a].iter().enumerate() {
+                if self.kind[a][f] == FIXED {
+                    u = u.max(v.abs());
+                }
+            }
+        }
+        if !self.fans.is_empty() {
+            u = u.max(1.0);
+        }
+        let g = &self.m.grid;
+        let lmin = (0..3)
+            .map(|a| g.nodes[a][g.nodes[a].len() - 1] - g.nodes[a][0])
+            .fold(f64::INFINITY, f64::min);
+        let k0 = 1.5 * (self.cfg.turbulence_intensity * u).powi(2);
+        let k0 = k0.max(K_MIN);
+        let l0 = 0.07 * lmin;
+        (k0, C_MU.powf(0.75) * k0.powf(1.5) / l0)
+    }
+
+    /// Inflow (k, ε) through boundary face f of axis a at speed |u|.
+    fn ke_inflow(&self, a: usize, f: usize, speed: f64) -> (f64, f64) {
+        let k = (1.5 * (self.cfg.turbulence_intensity * speed).powi(2)).max(K_MIN);
+        let bi = self.face_bnd[a][f];
+        let l = if bi >= 0 {
+            self.bnd_len[bi as usize]
+        } else {
+            0.07 * face_area(self.m, self.fd[a], a, f).sqrt().max(1e-3)
+        };
+        (k, (C_MU.powf(0.75) * k.powf(1.5) / l).max(EPS_MIN))
+    }
+
+    /// Convection–diffusion matrix of a cell scalar of the fluid (k or ε):
+    /// power-law faces between fluid cells, upwind inflow through the
+    /// domain boundary, zero gradient on outflow, no flux into walls.
+    /// Non-conservative form (ΔF·φ_P dropped, as for the energy predictor).
+    fn scalar_transport(
+        &self,
+        st: &State,
+        sigma: f64,
+        phi: &[f64],
+        inflow: &dyn Fn(usize, usize, f64) -> f64,
+    ) -> (Stencil, Vec<f64>) {
+        let g = &self.m.grid;
+        let n = self.n;
+        let nc = self.m.ncells;
+        let s = [1usize, n[0], n[0] * n[1]];
+        let rho = self.props.rho;
+        let mut mat = Stencil::new(n, 0);
+        let mut b = vec![0.0; nc];
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let p = g.ijk(c);
+            for a in 0..3 {
+                let area = g.face_area(c, a);
+                if p[a] + 1 < n[a] {
+                    let c2 = c + s[a];
+                    let mut ph = p;
+                    ph[a] += 1;
+                    let fh = fidx(self.fd[a], ph);
+                    if self.fluid[c2] && self.kind[a][fh] == ACTIVE {
+                        let ff = rho * st.u[a][fh] * area;
+                        let gam = self.props.mu + 0.5 * rho * (st.nut[c] + st.nut[c2]) / sigma;
+                        let dd = gam * area / (g.center(a, p[a] + 1) - g.center(a, p[a]));
+                        let ce = anb(self.scheme, dd, ff);
+                        let cw = anb(self.scheme, dd, -ff);
+                        mat.pos[a][c] = ce;
+                        mat.ap[c] += ce;
+                        mat.neg[a][c2] = cw;
+                        mat.ap[c2] += cw;
+                    }
+                }
+                // domain-boundary inflow
+                for hi in [false, true] {
+                    let edge = if hi { p[a] + 1 == n[a] } else { p[a] == 0 };
+                    if !edge {
+                        continue;
+                    }
+                    let mut pf = p;
+                    if hi {
+                        pf[a] += 1;
+                    }
+                    let f = fidx(self.fd[a], pf);
+                    if !matches!(self.kind[a][f], OPENING | FIXED) {
+                        continue;
+                    }
+                    let uin = if hi { -st.u[a][f] } else { st.u[a][f] };
+                    if uin > 0.0 {
+                        let fl = rho * uin * area;
+                        mat.ap[c] += fl;
+                        b[c] += fl * inflow(a, f, uin);
+                    }
+                }
+            }
+        }
+        for c in 0..nc {
+            if !self.fluid[c] || mat.ap[c] == 0.0 {
+                mat.fix(c);
+                b[c] = phi[c];
+            }
+        }
+        (mat, b)
+    }
+
+    /// Solve the k and ε equations on the current flow and update ν_t and
+    /// the wall functions. Returns the linear iterations.
+    fn update_ke(&self, st: &mut State, prev: Option<(&State, f64)>) -> usize {
+        let m = self.m;
+        let g = &m.grid;
+        let n = self.n;
+        let nc = m.ncells;
+        let s = [1usize, n[0], n[0] * n[1]];
+        let rho = self.props.rho;
+        let mu = self.props.mu;
+        let nu = mu / rho;
+        let cmu4 = C_MU.powf(0.25);
+        let cmu34 = C_MU.powf(0.75);
+        let grav = self.cfg.gravity;
+        let gmag = (grav[0] * grav[0] + grav[1] * grav[1] + grav[2] * grav[2]).sqrt();
+        let vc: Vec<[f64; 3]> = (0..nc)
+            .map(|c| {
+                if self.fluid[c] {
+                    self.cell_velocity(st, c)
+                } else {
+                    [0.0; 3]
+                }
+            })
+            .collect();
+        // production (shear + buoyancy) of the interior cells, wall
+        // production and wall dissipation coefficient of the wall cells
+        let mut prod = vec![0.0; nc];
+        let mut gbuo = vec![0.0; nc];
+        let mut c3 = vec![0.0; nc];
+        let mut wall = vec![false; nc];
+        let mut ywall = vec![f64::INFINITY; nc];
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let p = g.ijk(c);
+            let x = |a: usize| g.center(a, p[a]);
+            let mut grad = [[0.0f64; 3]; 3]; // grad[i][a] = ∂v_i/∂x_a
+            let mut gt = [0.0f64; 3];
+            for a in 0..3 {
+                let w = g.width(a, p[a]);
+                let side = |hi: bool| -> ([f64; 3], f64, f64) {
+                    let inner = if hi { p[a] + 1 < n[a] } else { p[a] > 0 };
+                    if inner {
+                        let nb = if hi { c + s[a] } else { c - s[a] };
+                        if self.fluid[nb] {
+                            let xn = g.center(a, if hi { p[a] + 1 } else { p[a] - 1 });
+                            return (vc[nb], xn, st.t[nb]);
+                        }
+                    }
+                    if self.is_wall(c, p, a, hi) {
+                        let xw = if hi { x(a) + 0.5 * w } else { x(a) - 0.5 * w };
+                        return ([0.0; 3], xw, st.t[c]);
+                    }
+                    (vc[c], x(a), st.t[c])
+                };
+                let (vl, xl, tl) = side(false);
+                let (vh, xh, th) = side(true);
+                if xh > xl {
+                    for i in 0..3 {
+                        grad[i][a] = (vh[i] - vl[i]) / (xh - xl);
+                    }
+                    gt[a] = (th - tl) / (xh - xl);
+                }
+            }
+            let mut s2 = 0.0;
+            for i in 0..3 {
+                for j in 0..3 {
+                    let sij = 0.5 * (grad[i][j] + grad[j][i]);
+                    s2 += 2.0 * sij * sij;
+                }
+            }
+            let mut_ = rho * st.nut[c];
+            prod[c] = mut_ * s2;
+            if self.props.beta != 0.0 && gmag > 0.0 {
+                gbuo[c] = self.props.beta
+                    * (mut_ / PR_T)
+                    * (grav[0] * gt[0] + grav[1] * gt[1] + grav[2] * gt[2]);
+                let v = vc[c];
+                let vpar = (v[0] * grav[0] + v[1] * grav[1] + v[2] * grav[2]) / gmag;
+                let v2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+                let vperp = (v2 - vpar * vpar).max(0.0).sqrt();
+                c3[c] = if vperp > 1e-12 {
+                    (vpar.abs() / vperp).tanh()
+                } else {
+                    1.0
+                };
+            }
+            let wy = self.wall_y[c];
+            if wy.iter().any(|y| *y > 0.0) {
+                wall[c] = true;
+                let kk = st.k[c].max(K_MIN);
+                let sk = kk.sqrt();
+                let mut pw = 0.0;
+                for a in 0..3 {
+                    let y = wy[a];
+                    if y <= 0.0 {
+                        continue;
+                    }
+                    ywall[c] = ywall[c].min(y);
+                    let v = vc[c];
+                    let ut2: f64 = (0..3).filter(|&i| i != a).map(|i| v[i] * v[i]).sum();
+                    let ut = ut2.sqrt();
+                    // scalable wall functions: y* limited to the log layer
+                    let ystar = (cmu4 * sk * y / nu).max(YSTAR_LAM);
+                    let tau = rho * KAPPA * cmu4 * sk * ut / (E_LOG * ystar).ln();
+                    pw += tau * cmu4 * sk / (KAPPA * y);
+                }
+                prod[c] = pw;
+            }
+        }
+        let alpha = if prev.is_some() { 1.0 } else { 0.7 };
+        let mut lin = 0usize;
+        // ---- k ----
+        let (mut mat, mut b) =
+            self.scalar_transport(st, SIGMA_K, &st.k, &|a, f, u| self.ke_inflow(a, f, u).0);
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let vol = g.volume(c);
+            let kk = st.k[c].max(K_MIN);
+            // dissipation, implicit: ρ ε = (ρ ε/k) k
+            let dcoef = if wall[c] {
+                rho * cmu34 * kk.sqrt() / (KAPPA * ywall[c])
+            } else {
+                rho * st.eps[c].max(EPS_MIN) / kk
+            };
+            mat.ap[c] += dcoef * vol;
+            let src = prod[c] + if wall[c] { 0.0 } else { gbuo[c] };
+            if src >= 0.0 {
+                b[c] += src * vol;
+            } else {
+                mat.ap[c] += -src / kk * vol;
+            }
+        }
+        self.finish_scalar(
+            &mut mat,
+            &mut b,
+            &st.k,
+            prev.map(|(p, dt)| (p.k.as_slice(), dt)),
+            alpha,
+        );
+        let mut knew = st.k.clone();
+        let sol = bicgstab(&mat, &b, &mut knew, 1e-3, 0.0, 100);
+        lin += sol.iterations;
+        for c in 0..nc {
+            knew[c] = if self.fluid[c] && knew[c].is_finite() {
+                knew[c].max(K_MIN)
+            } else {
+                st.k[c]
+            };
+        }
+        st.k = knew;
+        // ---- ε ----
+        let (mut mat, mut b) =
+            self.scalar_transport(st, SIGMA_E, &st.eps, &|a, f, u| self.ke_inflow(a, f, u).1);
+        let mut ew = vec![0.0; nc];
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let kk = st.k[c].max(K_MIN);
+            if wall[c] {
+                ew[c] = cmu34 * kk.powf(1.5) / (KAPPA * ywall[c]);
+                continue;
+            }
+            let vol = g.volume(c);
+            let e = st.eps[c].max(EPS_MIN);
+            mat.ap[c] += C2_E * rho * e / kk * vol;
+            let src = C1_E * (prod[c] + c3[c] * gbuo[c]) / kk; // × ε
+            if src >= 0.0 {
+                b[c] += src * e * vol;
+            } else {
+                mat.ap[c] += -src * vol;
+            }
+        }
+        self.finish_scalar(
+            &mut mat,
+            &mut b,
+            &st.eps,
+            prev.map(|(p, dt)| (p.eps.as_slice(), dt)),
+            alpha,
+        );
+        for c in 0..nc {
+            if wall[c] {
+                mat.fix(c);
+                b[c] = ew[c];
+            }
+        }
+        let mut enew = st.eps.clone();
+        for c in 0..nc {
+            if wall[c] {
+                enew[c] = ew[c];
+            }
+        }
+        let sol = bicgstab(&mat, &b, &mut enew, 1e-3, 0.0, 100);
+        lin += sol.iterations;
+        for c in 0..nc {
+            enew[c] = if self.fluid[c] && enew[c].is_finite() {
+                enew[c].max(EPS_MIN)
+            } else {
+                st.eps[c]
+            };
+        }
+        st.eps = enew;
+        // ---- ν_t and wall functions ----
+        let cp = self.props.cp;
+        let pr = mu * cp / self.k_mol;
+        let pfun =
+            9.24 * ((pr / PR_T).powf(0.75) - 1.0) * (1.0 + 0.28 * (-0.007 * pr / PR_T).exp());
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let kk = st.k[c];
+            let nut = (C_MU * kk * kk / st.eps[c]).min(1e5 * nu);
+            st.nut[c] = 0.3 * st.nut[c] + 0.7 * nut;
+            let wy = self.wall_y[c];
+            let sk = kk.sqrt();
+            for a in 0..3 {
+                let y = wy[a];
+                if y <= 0.0 {
+                    st.muw[c][a] = 0.0;
+                    st.kw[c][a] = 0.0;
+                    continue;
+                }
+                // scalable wall functions (Grotjans & Menter 1998): the log
+                // law with y* ≥ 11.225, so coarse wall cells keep the
+                // turbulent shear and heat transfer; never below molecular
+                let ystar = (cmu4 * sk * y / nu).max(YSTAR_LAM);
+                let ln = (E_LOG * ystar).ln();
+                st.muw[c][a] = (rho * KAPPA * cmu4 * sk * y / ln).max(mu);
+                let tplus = PR_T * (ln / KAPPA + pfun);
+                st.kw[c][a] = (rho * cp * cmu4 * sk * y / tplus).max(self.k_mol);
+            }
+        }
+        lin
+    }
+
+    /// Transient term and steady under-relaxation of a k/ε equation.
+    fn finish_scalar(
+        &self,
+        mat: &mut Stencil,
+        b: &mut [f64],
+        phi: &[f64],
+        prev: Option<(&[f64], f64)>,
+        alpha: f64,
+    ) {
+        let g = &self.m.grid;
+        for c in 0..self.m.ncells {
+            if !self.fluid[c] {
+                continue;
+            }
+            if let Some((old, dt)) = prev {
+                let co = self.props.rho * g.volume(c) / dt;
+                mat.ap[c] += co;
+                b[c] += co * old[c];
+            }
+            if alpha < 1.0 {
+                let ap = mat.ap[c];
+                mat.ap[c] = ap / alpha;
+                b[c] += (mat.ap[c] - ap) * phi[c];
+            }
+        }
+    }
+
+    /// Effective viscosity of the wall shear on the plane normal to `axis`
+    /// next to the velocity face between cells `cl` and `ch`.
+    fn mu_wall(&self, st: &State, cl: usize, ch: usize, axis: usize) -> f64 {
+        if !self.ke {
+            return self.props.mu;
+        }
+        let pick = |c: usize| {
+            let v = st.muw[c][axis];
+            if v > 0.0 {
+                v
+            } else {
+                self.props.mu
+            }
+        };
+        0.5 * (pick(cl) + pick(ch))
+    }
+
     /// Update the linearisation of every curve fan from the current flow.
     fn update_fans(&mut self, st: &State) {
         for fan in self.fans.iter_mut() {
@@ -876,7 +1387,7 @@ impl<'a> Solver<'a> {
                             sum_anb += c_n;
                             df += f_out;
                         } else {
-                            let dw = self.props.mu * an / (0.5 * wb);
+                            let dw = self.mu_wall(st, cl, ch, bx) * an / (0.5 * wb);
                             sum_anb += dw;
                         }
                         continue;
@@ -916,11 +1427,15 @@ impl<'a> Solver<'a> {
                         _ => {
                             if !self.fluid[cln] && !self.fluid[chn] {
                                 // solid wall on the plane between the rows
-                                sum_anb += self.props.mu * an / (0.5 * wb);
+                                sum_anb += self.mu_wall(st, cl, ch, bx) * an / (0.5 * wb);
                             } else {
                                 // face on the side of a solid: u = 0 at the neighbour node
                                 let delta = 0.5 * (wb + g.width(bx, pn[bx]));
-                                let c_n = anb(self.scheme, self.props.mu * an / delta, f_out);
+                                let c_n = anb(
+                                    self.scheme,
+                                    self.mu_wall(st, cl, ch, bx) * an / delta,
+                                    f_out,
+                                );
                                 sum_anb += c_n;
                                 df += f_out;
                             }
@@ -1203,8 +1718,42 @@ impl<'a> Solver<'a> {
         let mut b = m.source.clone();
         let rc = self.props.rho * self.props.cp;
         let k = self.k_eff(st);
-        let gc = conductances(g, &k);
-        let bnd = m.boundary_at(&k);
+        let mut gc = conductances(g, &k);
+        let mut bnd = m.boundary_at(&k);
+        if self.ke {
+            // thermal wall functions: fluid–solid faces and closed domain faces
+            for c in 0..nc {
+                let p = g.ijk(c);
+                for a in 0..3 {
+                    if p[a] + 1 >= n[a] {
+                        continue;
+                    }
+                    let c2 = c + s[a];
+                    if self.fluid[c] == self.fluid[c2] {
+                        continue;
+                    }
+                    let (cf, cs) = if self.fluid[c] { (c, c2) } else { (c2, c) };
+                    let kw = st.kw[cf][a];
+                    if kw > 0.0 {
+                        let pf = g.ijk(cf);
+                        let ps = g.ijk(cs);
+                        gc[a][c] = g.face_area(c, a)
+                            / (0.5 * g.width(a, pf[a]) / kw + 0.5 * g.width(a, ps[a]) / k[cs][a]);
+                    }
+                }
+            }
+            let used = |c: usize, a: usize| if m.has_kt { k[c][a] } else { m.k[c][a] };
+            let mut v = bnd.into_owned();
+            for e in v.iter_mut() {
+                if let Some(a) = e.axis {
+                    let a = a as usize;
+                    if e.node < nc && self.fluid[e.node] && st.kw[e.node][a] > 0.0 {
+                        e.r_int *= used(e.node, a) / st.kw[e.node][a];
+                    }
+                }
+            }
+            bnd = std::borrow::Cow::Owned(v);
+        }
         // net mass outflow × cp of every cell, W/K
         let mut fnet = vec![0.0; nc];
         for c in 0..nc {
@@ -1451,7 +2000,20 @@ pub fn run(
         t: vec![m.initial_c; m.nnodes],
         ts: vec![m.initial_c; m.boundary.len()],
         nut: vec![0.0; nc],
+        k: vec![0.0; nc],
+        eps: vec![0.0; nc],
+        muw: vec![[0.0; 3]; nc],
+        kw: vec![[0.0; 3]; nc],
     };
+    if sv.ke {
+        let (k0, e0) = sv.ke_initial();
+        for c in 0..nc {
+            if sv.fluid[c] {
+                st.k[c] = k0;
+                st.eps[c] = e0;
+            }
+        }
+    }
     let lvel = sv.cfg.turbulence == Turbulence::Lvel;
     let tol = sv.cfg.tolerance;
     let mut residuals: Vec<[f64; 3]> = Vec::new();
@@ -1470,6 +2032,9 @@ pub fn run(
         let t0 = std::time::Instant::now();
         if lvel {
             sv.update_nut(st);
+        }
+        if sv.ke {
+            *lin_it += sv.update_ke(st, prev);
         }
         sv.update_fans(st);
         let t1 = t0.elapsed();
@@ -1697,13 +2262,7 @@ pub fn run(
             let mut rate = 0.0;
             converged = true;
             for step in 1..=nsteps {
-                let old = State {
-                    u: st.u.clone(),
-                    p: st.p.clone(),
-                    t: st.t.clone(),
-                    ts: st.ts.clone(),
-                    nut: st.nut.clone(),
-                };
+                let old = st.copy();
                 let mut step_ok = false;
                 for inner in 1..=sv.cfg.iterations_per_step.max(1) {
                     let raw = iterate(&mut sv, &mut st, Some((&old, dt)), &mut lin_it)?;
@@ -1854,6 +2413,7 @@ pub fn run(
             turbulence: match sv.cfg.turbulence {
                 Turbulence::Laminar => "laminar".into(),
                 Turbulence::Lvel => "LVEL".into(),
+                Turbulence::KEpsilon => "k-epsilon".into(),
             },
             averaged_iterations: averaged,
             oscillation_k: oscillation,

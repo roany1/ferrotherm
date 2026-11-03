@@ -13,14 +13,17 @@ clone of any commercial code and it is **not** certified: see the
 limitations below.
 
 > 🇮🇹 **In breve:** solutore termofluidodinamico 3D (Navier–Stokes
-> incomprimibile con galleggiamento di Boussinesq, turbolenza LVEL,
+> incomprimibile con galleggiamento di Boussinesq, turbolenza LVEL o k-ε,
 > conduzione coniugata nei solidi) per apparati elettronici. Ventole con
 > curva P–Q, aperture e griglie con perdite di carico, dissipatori alettati,
 > irraggiamento interno superficie-superficie, carico solare, conducibilità
 > k(T), modelli compatti 2R e DELPHI multi-nodo con verifica del derating Tj
 > (NSWC Crane SD-18), librerie di materiali/finiture/package con riferimenti
 > MIL/AMS/ASTM/IPC, ambienti MIL-STD-810H. Importa STEP (tramite
-> OpenCascade), STL, IDF 3.0, KiCad, Gerber+Excellon, IPC-2581 e ODB++;
+> OpenCascade, con editor di semplificazione: chiusura fori, rimozione di
+> boss, raccordi, smussi e viteria), STL, IDF 3.0, KiCad, Gerber+Excellon,
+> IPC-2581, ODB++ e modelli Cadence Celsius EC Solver; schede di forma
+> qualsiasi (contorno poligonale con asole);
 > esporta STEP, STL, IDF, VTK (ParaView) e CSV. Interfaccia grafica desktop
 > per Windows/macOS/Linux e riga di comando.
 >
@@ -35,14 +38,15 @@ limitations below.
 | Area | What is implemented |
 |---|---|
 | Flow (CFD) | Steady and transient incompressible Navier–Stokes, finite volumes on a staggered Cartesian grid, SIMPLEC pressure–velocity coupling, power-law or upwind convection, Boussinesq buoyancy, conjugate heat transfer (fluid = domain fill, blocks = solids) |
-| Turbulence | LVEL (wall distance from a Poisson equation + Spalding law of the wall, turbulent Prandtl 0.9) or laminar |
+| Turbulence | LVEL (wall distance from a Poisson equation + Spalding law of the wall, turbulent Prandtl 0.9), standard k–ε (Launder & Spalding) with scalable log-law wall functions for momentum and heat (Jayatilleke) and buoyancy production, or laminar |
 | Flow devices | Fans with datasheet P–Q curve (operating point found by the solver) or fixed flow, round with hub or rectangular, in the wall or inside the box; openings (vents) at ambient pressure; fixed-flow inlets; symmetry planes; planar resistances (grilles, perforated plates, filters) with quadratic + laminar loss; parametric plate-fin heat sinks |
 | Heat transfer | Orthotropic conduction, temperature-dependent k(T), convection and grey radiation boundaries, imposed heat flux and solar load, internal surface-to-surface radiation (Monte Carlo view factors, radiosity) |
 | Components | 2-resistor (θJC/θJB) and DELPHI-style multi-node compact models (top/bottom inner/outer, sides, leads); Tj, case and board temperatures, heat split per surface; PASS/FAIL against SD-18 derating or a user limit |
-| PCB | Layered effective-conductivity stack; from ECAD data the board becomes a map of tiles, each with the copper coverage of every layer and the plated-via fraction measured from the artwork |
+| PCB | Layered effective-conductivity stack; from ECAD data the board becomes a map of tiles, each with the copper coverage of every layer and the plated-via fraction measured from the artwork; any board shape (polygon outline with cut-outs, also on blocks in general) |
 | Solvers | BiCGSTAB/PCG with additive-correction multigrid; relative residuals plus a "temperatures settled" convergence check on junctions and monitor points; exact global energy balance reported |
-| CAD import | STEP AP203/214/242 (B-rep imported and tessellated by OpenCascade 8, compiled to WebAssembly, with assembly names and placements), STL, IDF 3.0, KiCad `.kicad_pcb` (v5–v9), Gerber X2/RS-274X + Excellon (+ job file), IPC-2581, ODB++ (folder or `.tgz/.zip`, `.Z` files), power list CSV; complete **Cadence Celsius EC Solver** models (`.equipment`: chassis, environment, materials with surface emissivity, radiation settings, PCBs in any 90° orientation with their parts, 2R components, heat sinks, obstructions and CAD solids) |
-| Export | STEP (AP214 solids), STL, IDF 3.0 board + library, VTK (`.vtr/.pvd`: temperature, velocity, speed, pressure, material, power density), `report.md/json`, `components.csv`, `blocks.csv`, `junctions.csv` |
+| CAD import | STEP AP203/214/242 (B-rep imported and tessellated by OpenCascade 8, compiled to WebAssembly, with assembly names and placements), STL, IDF 3.0, KiCad `.kicad_pcb` (v5–v9), Gerber X2/RS-274X + Excellon (+ job file), IPC-2581, ODB++ (folder or `.tgz/.zip`, `.Z` files), power list CSV; complete **Cadence Celsius EC Solver** models (`.equipment`: chassis, environment, materials with surface emissivity, radiation settings, PCBs in any 90° orientation with their parts, 2R components, heat sinks, obstructions and CAD solids; "Detailed" packages split into body, die, substrate…) |
+| CAD clean-up | Defeaturing editor on the exact B-rep (OpenCascade `BRepAlgoAPI_Defeaturing`), GUI and CLI: close through/blind/countersunk/counterbored holes, remove bosses, pins and standoffs, fillets and rounds, chamfers; drop small parts (screws, nuts); replace nearly box-shaped parts by their box; names and placements of the assembly kept, simplified STEP saved |
+| Export | STEP (AP214 solids), STL, IDF 3.0 board (outline and cut-outs) + library, VTK (`.vtr/.pvd`: temperature, velocity, speed, pressure, material, power density), `report.md/json`, `components.csv`, `blocks.csv`, `junctions.csv` |
 | Libraries | 39 materials, finishes, 19 packages (incl. MIL-HDBK-217F θJC defaults), MIL-STD-810H environments, SD-18 derating rules — every entry with its source; extendable with your own JSON |
 | Desktop app | Model tree and property editors for every object (fans, grilles, heat sinks, monitors, DELPHI networks, flow and radiation settings), 3D view with X-ray and section planes, temperature / air-speed / pressure maps with velocity arrows, live residual plot, CAD import dialog with board preview, undo/redo |
 
@@ -89,6 +93,7 @@ $F cad-info board.kicad_pcb                 # what a CAD file contains
 $F import board.kicad_pcb -o box.toml --power power.csv --tile 10
 $F import chassis.step --into box.toml --shape voxel:1 --material al-6061-t6
 $F import gerbers.zip --into box.toml --origin 10,10,5
+$F defeature chassis.step simple.step --holes 8 --fillets 3 --small-parts 50
 $F export box.toml box.step                 # also .stl, .emn (IDF)
 $F check box.toml
 $F run box.toml -o results
@@ -129,7 +134,12 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | Real KiCad board vs its own Gerber export | Same board, two readers | copper coverage within 0.04 %; cross-checked with gerbv |
 | Real KiCad STEP assembly (55 parts) | Pick-and-place file | 54/54 placed parts at their position |
 | Celsius EC Solver model with vertical boards (2024.36) | STEP export of the same model made by Celsius | boards, parts and CAD obstructions within 1e-3 mm |
-| Same model solved (sealed conduction-cooled chassis, 3 vertical boards, natural convection + radiation, 18 W) | Temperatures computed by Celsius EC Solver | 2R junctions U1 −1.8 K, U2 −3.1 K; block parts −0.2 … −5.8 K (FerroTherm lower); detailed die not resolved (package lumped into a block) |
+| Same model solved (sealed conduction-cooled chassis, 3 vertical boards, natural convection + radiation, 18 W) | Temperatures computed by Celsius EC Solver | 2R junctions U1 −1.8 K, U2 −3.1 K; block parts −0.2 … −5.8 K (FerroTherm lower); detailed die lumped into its package (before the Detailed-package import below) |
+| Turbulent channel, k–ε + wall functions (H = 20 mm, Re_H ≈ 12 600, wall cells y* ≈ 18…75) | Dean (1978) C_f, Gnielinski (1976) Nu | C_f −11 % (log law alone gives −5 %), Nu +3 … +5 %; grid-independent within 3 % |
+| k–ε, heated block in a duct (3D, conjugate) | Energy balance | imbalance < 0.01 % |
+| L-shaped board with a hole (polygon outline) | Exact area, power, export/re-import (STL, IDF with cut-out) | area 5900 mm² exact on a matching grid, all power in the board |
+| Celsius "Detailed" package (synthetic) | Hand-placed die and substrate | die and substrate at their place in either frame; fallback to one block when the parts fit no frame |
+| Defeaturing: plate with through, blind and counterbored holes, a boss, fillets; chassis shell with 12 vents, 4 screw holes and filleted edges; chamfered cover; two-instance assembly | Exact volumes | plain plate 24 000 mm³, shell 48 992 mm³, cover 15 000 mm³ (all exact); instance names and placements kept |
 | FerroTherm STEP/IDF/STL export | Re-import (OpenCascade for STEP) | boxes recovered within 1e-4 mm |
 | KiCad board → case → solve | Power in = heat out | imbalance < 1e-6 % |
 
@@ -140,12 +150,22 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
   LVEL, compact models), but the code is young and validated only on the
   benchmarks above. Compare with measurements or another tool before using
   results for qualification.
-- **Turbulence:** LVEL or laminar only (no k-ε / k-ω yet). Strongly separated
-  or unsteady flows may not reach a steady residual; the solver then stops at
-  `max_iterations` and reports *NOT converged* — look at the Convergence tab
-  and the monitor points, or run transient.
+- **Turbulence:** LVEL, standard k–ε or laminar (no k-ω / SST yet). k–ε with
+  wall functions is meant for forced, fully turbulent flows (fans, ducts):
+  on low-Reynolds electronics flows it underpredicts the heat transfer on
+  coarse grids (heated block at 3 m/s, Re ≈ 5600: block 587 °C with 2.5 mm
+  cells, 340 °C with 1 mm cells, against 245 / 302 °C with LVEL). LVEL stays
+  the default for electronics. Strongly separated or unsteady flows may not
+  reach a steady residual; the solver then stops at `max_iterations` and
+  reports *NOT converged* — look at the Convergence tab and the monitor
+  points, or run transient.
 - **Geometry is axis-aligned boxes** (staircase). STEP bodies are imported
   as bounding boxes or voxels; inclined or curved surfaces are approximated.
+  Polygon outlines (boards, blocks) are resolved at the cell centres.
+- **Defeaturing** recognises analytic faces (cylinders, cones, tori,
+  planes). Spline-only geometry (e.g. a hole exported as B-spline surfaces)
+  is not recognised; a removal OpenCascade cannot rebuild is skipped and
+  reported, never left broken.
 - **CPU only** (multithreaded); no GPU solver yet.
 - **IPC-2581 and ODB++** readers are tested on files structured like KiCad's
   exporters and on synthetic samples, not yet on Cadence Allegro / Mentor
@@ -155,7 +175,11 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
   CAD solids inside groups are checked against Celsius' own STEP export.
   Rotations combining several axes, tilted boards and parts rotated on the
   board use conventions not verified yet and are flagged; objects that land
-  outside the chassis are listed in the import warnings.
+  outside the chassis are listed in the import warnings. "Detailed" packages
+  are split into their parts when every part fits the package body in one
+  of three frames (package corner, board, chassis); which frame Celsius
+  actually uses is not yet checked on a real model, so the import says
+  which one it took.
 - **IDF** is imported with board outline, placements and part outlines/heights
   (no copper): combine with Gerber/ODB++ for the copper map.
 - Missing part heights are guessed from the package name and listed as a
@@ -177,17 +201,20 @@ of each standard before using results for qualification.
 ```
 crates/ferrotherm-core   numerical engine (conduction, CFD, radiation) + libraries
 crates/ferrotherm-io     CAD import/export (STEP via OpenCascade-WASM, STL, IDF,
-                         KiCad, Gerber/Excellon, IPC-2581, ODB++)
+                         KiCad, Gerber/Excellon, IPC-2581, ODB++, Celsius),
+                         STEP defeaturing
 crates/ferrotherm-cli    `ferrotherm` command-line tool
 crates/ferrotherm-gui    `ferrotherm-gui` desktop app (egui/eframe)
 examples/                example cases
-docs/                    case-file reference
+docs/                    case-file reference, Italian guide
+ROADMAP.md               development phases and what each must validate
 ```
 
 Third-party: OpenCascade Technology (LGPL-2.1 with exception) is used
 through the `occt-wasm` crate as a WebAssembly module run by wasmtime; it can
 be left out with `--no-default-features` on `ferrotherm-io` (STEP then falls
-back to the built-in reader, which gives vertex bounding boxes only).
+back to the built-in reader, which gives vertex bounding boxes only, and
+defeaturing is not available).
 
 ## License
 

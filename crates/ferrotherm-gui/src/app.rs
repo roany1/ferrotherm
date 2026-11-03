@@ -909,6 +909,8 @@ impl FerroApp {
             power_w: 0.0,
             emissivity: None,
             finish: None,
+            outline: None,
+            outline_axis: None,
         });
         self.hidden.push(false);
         self.sel = Sel::Block(self.case.blocks.len() - 1);

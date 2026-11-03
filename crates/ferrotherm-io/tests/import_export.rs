@@ -165,3 +165,59 @@ max_cell_mm = 4
     assert!(r.energy_imbalance_pct.abs() < 0.1);
     assert!(r.t_max_c > 25.0);
 }
+
+/// L-shaped board with a hole: STL/STEP export as strip boxes covering the
+/// exact outline area, IDF export keeps the outline and the cut-out, and the
+/// re-imported IDF board becomes a block with the same outline.
+#[test]
+fn polygon_board_export_round_trip() {
+    let case = Case::from_toml(
+        r#"
+        [domain]
+        min = [-10, -10, 0]
+        max = [110, 90, 10]
+        material = "air-still"
+        [[blocks]]
+        name = "board"
+        min = [0, 0, 4]
+        max = [100, 80, 5.6]
+        outline = [
+            [[0, 0], [100, 0], [100, 40], [50, 40], [50, 80], [0, 80]],
+            [[20, 20], [30, 20], [30, 30], [20, 30]],
+        ]
+        [blocks.pcb]
+        thickness_mm = 1.6
+        layers = 4
+        copper_oz = 1.0
+        coverage = 0.5
+    "#,
+    )
+    .unwrap();
+    let lib = ferrotherm_core::library::Library::builtin();
+    let boxes = export::case_boxes(&case, &lib).unwrap();
+    let area: f64 = boxes
+        .iter()
+        .map(|(_, a, b)| (b[0] - a[0]) * (b[1] - a[1]))
+        .sum();
+    eprintln!("POLY EXPORT: {} boxes, area {area}", boxes.len());
+    assert!((area - 5900.0).abs() < 1e-9);
+    let stl = export::case_to_stl(&case, &lib).unwrap();
+    let m = ferrotherm_io::stl::read(stl.as_bytes(), "x", 1.0).unwrap();
+    let vol: f64 = m.bodies.iter().map(|b| b.volume()).sum();
+    assert!((vol - 5900.0 * 1.6).abs() < 1e-3);
+    // IDF: outline + cut-out survive
+    let (emn, emp) = export::case_to_idf(&case, &lib).unwrap();
+    let b = ferrotherm_io::idf::read(&emn, Some(&emp)).unwrap();
+    assert_eq!(b.outline.len(), 2);
+    let shoelace = |r: &Vec<[f64; 2]>| {
+        let n = r.len();
+        (0..n)
+            .map(|i| r[i][0] * r[(i + 1) % n][1] - r[(i + 1) % n][0] * r[i][1])
+            .sum::<f64>()
+            .abs()
+            * 0.5
+    };
+    let a0 = shoelace(&b.outline[0]);
+    let a1 = shoelace(&b.outline[1]);
+    assert!((a0 - a1 - 5900.0).abs() < 1e-6, "{a0} {a1}");
+}

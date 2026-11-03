@@ -125,6 +125,35 @@ enum Cmd {
         /// Output file; format from the extension (.step/.stp, .stl, .emn)
         out: PathBuf,
     },
+    /// Simplify a STEP model before import (OpenCascade defeaturing): close
+    /// holes, remove bosses, fillets and chamfers, drop small parts, box
+    /// nearly box-shaped parts. Writes a new STEP file.
+    Defeature {
+        input: PathBuf,
+        output: PathBuf,
+        /// Close holes up to this diameter, mm (0 = keep all holes)
+        #[arg(long, default_value_t = 10.0)]
+        holes: f64,
+        /// Remove cylindrical bosses/pins/standoffs up to this diameter, mm
+        #[arg(long, default_value_t = 0.0)]
+        bosses: f64,
+        /// Remove fillets and rounds up to this radius, mm
+        #[arg(long, default_value_t = 3.0)]
+        fillets: f64,
+        /// Remove chamfers up to this width, mm
+        #[arg(long, default_value_t = 2.0)]
+        chamfers: f64,
+        /// Drop parts up to this volume, mm³ (screws, nuts)
+        #[arg(long, default_value_t = 0.0)]
+        small_parts: f64,
+        /// Replace parts filling at least this fraction of their bounding box
+        /// by the box (e.g. 0.9; 0 = never)
+        #[arg(long, default_value_t = 0.0)]
+        box_ratio: f64,
+        /// Write the per-part report as JSON
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Effective conductivity of a PCB stack-up.
     Pcb {
         /// Board thickness, mm
@@ -615,6 +644,62 @@ fn main() -> Result<()> {
                 _ => anyhow::bail!("unknown export format '.{ext}' (use .step, .stl or .emn)"),
             }
             println!("wrote {}", out.display());
+        }
+        Cmd::Defeature {
+            input,
+            output,
+            holes,
+            bosses,
+            fillets,
+            chamfers,
+            small_parts,
+            box_ratio,
+            report,
+        } => {
+            let pos = |v: f64| (v > 0.0).then_some(v);
+            let opt = ferrotherm_io::defeature::DefeatureOptions {
+                hole_max_diameter_mm: pos(holes),
+                boss_max_diameter_mm: pos(bosses),
+                fillet_max_radius_mm: pos(fillets),
+                chamfer_max_width_mm: pos(chamfers),
+                small_part_max_volume_mm3: pos(small_parts),
+                box_fill_ratio: pos(box_ratio),
+                unify: true,
+            };
+            let text = std::fs::read_to_string(&input)
+                .with_context(|| format!("reading {}", input.display()))?;
+            let (step, rep) = ferrotherm_io::defeature::defeature_step(&text, &opt)
+                .map_err(anyhow::Error::msg)?;
+            std::fs::write(&output, step)?;
+            println!("{}", rep.summary());
+            for p in &rep.parts {
+                if p.removed {
+                    println!(
+                        "  {} ×{}: dropped ({:.1} mm³)",
+                        p.name, p.instances, p.volume_before_mm3
+                    );
+                    continue;
+                }
+                println!(
+                    "  {} ×{}: holes {}, bosses {}, fillets {}, chamfers {}{}{} · faces {} → {} · volume {:.1} → {:.1} mm³",
+                    p.name,
+                    p.instances,
+                    p.holes,
+                    p.bosses,
+                    p.fillets,
+                    p.chamfers,
+                    if p.skipped > 0 { format!(", {} kept", p.skipped) } else { String::new() },
+                    if p.boxed { ", boxed" } else { "" },
+                    p.faces_before,
+                    p.faces_after,
+                    p.volume_before_mm3,
+                    p.volume_after_mm3
+                );
+            }
+            if let Some(r) = report {
+                std::fs::write(&r, serde_json::to_string_pretty(&rep)?)?;
+            }
+            println!("wrote {}", output.display());
         }
         Cmd::Pcb {
             thickness,

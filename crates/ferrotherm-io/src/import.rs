@@ -436,6 +436,8 @@ pub fn mcad_to_fragment(m: &StepModel, opt: &McadOptions) -> Fragment {
                     power_w: 0.0,
                     emissivity: None,
                     finish: Some("pcb-soldermask".into()),
+                    outline: None,
+                    outline_axis: None,
                 }
             } else {
                 Block {
@@ -447,6 +449,8 @@ pub fn mcad_to_fragment(m: &StepModel, opt: &McadOptions) -> Fragment {
                     power_w: 0.0,
                     emissivity: None,
                     finish: None,
+                    outline: None,
+                    outline_axis: None,
                 }
             };
             fr.blocks.push(block);

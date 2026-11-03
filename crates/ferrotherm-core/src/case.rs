@@ -65,6 +65,13 @@ pub enum Turbulence {
     /// from a Poisson equation + Spalding's law of the wall.
     #[default]
     Lvel,
+    /// Standard k–ε (Launder & Spalding 1974) with equilibrium wall functions
+    /// for momentum and heat (log law, Jayatilleke thermal sub-layer) and
+    /// buoyancy production. Scalable wall functions: y* is limited to the
+    /// log layer (≥ 11.225), so fine near-wall cells do not degrade the
+    /// result; best accuracy with wall cells at y* ≈ 30…300.
+    #[serde(alias = "k-epsilon", alias = "ke", alias = "k_e")]
+    KEpsilon,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -106,6 +113,10 @@ pub struct FlowSettings {
     /// Outer iterations per time step (transient).
     #[serde(default = "default_inner")]
     pub iterations_per_step: usize,
+    /// k–ε: turbulence intensity of the air entering through inlets and
+    /// openings (k = 1.5 (I·U)²; length scale 0.07 √A of the boundary).
+    #[serde(default = "default_intensity")]
+    pub turbulence_intensity: f64,
 }
 
 impl Default for FlowSettings {
@@ -122,6 +133,7 @@ impl Default for FlowSettings {
             relax_pressure: default_relax_p(),
             relax_temperature: default_relax_t(),
             iterations_per_step: default_inner(),
+            turbulence_intensity: default_intensity(),
         }
     }
 }
@@ -146,6 +158,9 @@ fn default_relax_p() -> f64 {
 }
 fn default_relax_t() -> f64 {
     1.0
+}
+fn default_intensity() -> f64 {
+    0.05
 }
 fn default_inner() -> usize {
     20
@@ -333,6 +348,8 @@ impl HeatSink {
             power_w: 0.0,
             emissivity: self.emissivity,
             finish: None,
+            outline: None,
+            outline_axis: None,
         });
         let pitch = if self.fin_count > 1 {
             (width - self.fin_thickness) / (self.fin_count - 1) as f64
@@ -361,6 +378,8 @@ impl HeatSink {
                 power_w: 0.0,
                 emissivity: self.emissivity,
                 finish: None,
+                outline: None,
+                outline_axis: None,
             });
         }
         Ok(out)
@@ -483,6 +502,133 @@ pub struct Block {
     pub emissivity: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<String>,
+    /// In-plane outline (polygon boards, cut-outs): closed rings, mm, in the
+    /// two axes perpendicular to `outline_axis` (absolute coordinates, in the
+    /// order x,y / y,z / x,z... see [`crate::model::tangential`]). A cell of the
+    /// box belongs to the block when its centre is inside the rings
+    /// (even–odd rule: an inner ring is a hole).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Vec<Vec<[f64; 2]>>>,
+    /// Normal of the outline plane: "x", "y" or "z" (default: the PCB normal,
+    /// else the thinnest side of the box).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_axis: Option<String>,
+}
+
+impl Block {
+    /// Axis normal to the outline plane.
+    pub fn outline_normal(&self) -> crate::error::Result<usize> {
+        if let Some(a) = &self.outline_axis {
+            return crate::model::axis_of(a);
+        }
+        if let Some(p) = &self.pcb {
+            return p.normal_axis();
+        }
+        let d = [0, 1, 2].map(|a| self.max[a] - self.min[a]);
+        Ok((0..3)
+            .min_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap())
+            .unwrap())
+    }
+
+    /// The block as boxes (mm): itself without an outline, else the outline
+    /// cut into strips between its vertices (exact for rectilinear outlines,
+    /// sloped edges at the strip mid-line). Used for STEP/STL export.
+    pub fn outline_boxes(&self) -> crate::error::Result<Vec<([f64; 3], [f64; 3])>> {
+        let Some(rings) = &self.outline else {
+            return Ok(vec![(self.min, self.max)]);
+        };
+        let a = self.outline_normal()?;
+        let t = crate::model::tangential(a);
+        let (u0, u1) = (self.min[t[0]], self.max[t[0]]);
+        let (v0, v1) = (self.min[t[1]], self.max[t[1]]);
+        let mut us: Vec<f64> = rings
+            .iter()
+            .flatten()
+            .map(|p| p[0].clamp(u0, u1))
+            .chain([u0, u1])
+            .collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        us.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        let mut out: Vec<([f64; 3], [f64; 3])> = Vec::new();
+        let mut prev: Option<(Vec<[f64; 2]>, usize)> = None;
+        for w in us.windows(2) {
+            let uc = 0.5 * (w[0] + w[1]);
+            let mut xs = Vec::new();
+            for r in rings {
+                let n = r.len();
+                if n < 3 {
+                    continue;
+                }
+                let mut j = n - 1;
+                for i in 0..n {
+                    let (p, q) = (r[i], r[j]);
+                    if (p[0] > uc) != (q[0] > uc) {
+                        xs.push(p[1] + (uc - p[0]) * (q[1] - p[1]) / (q[0] - p[0]));
+                    }
+                    j = i;
+                }
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let iv: Vec<[f64; 2]> = xs
+                .chunks_exact(2)
+                .map(|c| [c[0].clamp(v0, v1), c[1].clamp(v0, v1)])
+                .filter(|c| c[1] - c[0] > 1e-9)
+                .collect();
+            // merge with the previous strip when its intervals are identical
+            if let Some((piv, start)) = &prev {
+                if *piv == iv {
+                    for b in out[*start..].iter_mut() {
+                        b.1[t[0]] = w[1];
+                    }
+                    continue;
+                }
+            }
+            let start = out.len();
+            for c in &iv {
+                let mut lo = self.min;
+                let mut hi = self.max;
+                lo[t[0]] = w[0];
+                hi[t[0]] = w[1];
+                lo[t[1]] = c[0];
+                hi[t[1]] = c[1];
+                out.push((lo, hi));
+            }
+            prev = Some((iv, start));
+        }
+        Ok(out)
+    }
+
+    /// Is the point (mm, in the outline plane) inside the outline? Always
+    /// true without an outline.
+    pub fn outline_contains(&self, u: f64, v: f64) -> bool {
+        match &self.outline {
+            None => true,
+            Some(rings) => point_in_rings(rings, u, v),
+        }
+    }
+}
+
+/// Even–odd point-in-polygon test over several rings (holes allowed).
+pub fn point_in_rings(rings: &[Vec<[f64; 2]>], u: f64, v: f64) -> bool {
+    let mut inside = false;
+    for r in rings {
+        let n = r.len();
+        if n < 3 {
+            continue;
+        }
+        let mut j = n - 1;
+        for i in 0..n {
+            let (a, b) = (r[i], r[j]);
+            if (a[1] > v) != (b[1] > v) {
+                let x = a[0] + (v - a[1]) * (b[0] - a[0]) / (b[1] - a[1]);
+                if u < x {
+                    inside = !inside;
+                }
+            }
+            j = i;
+        }
+    }
+    inside
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

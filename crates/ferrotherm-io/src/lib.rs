@@ -8,6 +8,8 @@
 
 pub mod archive;
 pub mod celsius;
+#[cfg(feature = "occt")]
+pub mod defeature;
 pub mod ecad;
 pub mod export;
 pub mod geom;

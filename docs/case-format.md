@@ -51,6 +51,20 @@ initial temperature.
 | `min`, `max` | Box corners |
 | `power_w` | Uniform heat load of the block, default 0 |
 | `emissivity` or `finish` | Surface emissivity for internal radiation (`[radiation]`) |
+| `outline` | Optional polygon shape: list of closed rings `[[u, v], …]`, mm, absolute coordinates in the plane normal to `outline_axis` (axes x,y for normal z; x,z for y; y,z for x). Only the cells of the box whose centre is inside belong to the block; even–odd rule, so an inner ring is a hole/cut-out. Exported to STEP/STL as strip boxes and to IDF as board outline + cut-outs |
+| `outline_axis` | `x`, `y` or `z`; default the PCB normal, else the thinnest side of the box |
+
+```toml
+[[blocks]]
+name = "board"
+min = [0, 0, 4]
+max = [100, 80, 5.6]
+outline = [
+    [[0, 0], [100, 0], [100, 40], [50, 40], [50, 80], [0, 80]],  # L shape
+    [[20, 20], [30, 20], [30, 30], [20, 30]],                    # hole
+]
+pcb = { thickness_mm = 1.6, layers = 4, copper_oz = 1.0, coverage = 0.5 }
+```
 
 ### PCB stack (`pcb = { ... }`)
 
@@ -124,7 +138,8 @@ transient (follows `[solver] mode`).
 
 | Key | Default | Notes |
 |---|---|---|
-| `turbulence` | `lvel` | `lvel` (algebraic, wall distance + Spalding law) or `laminar` |
+| `turbulence` | `lvel` | `lvel` (algebraic, wall distance + Spalding law), `k_epsilon` (standard k–ε, scalable wall functions; also `k-epsilon`) or `laminar` |
+| `turbulence_intensity` | 0.05 | k–ε: intensity of the air entering through inlets, openings and fans in the wall; length scale 0.07 √A of the boundary |
 | `scheme` | `power_law` | or `upwind` |
 | `gravity` | `[0, 0, -9.81]` | m/s²; z up |
 | `reference_temperature_c` | ambient | Boussinesq reference |

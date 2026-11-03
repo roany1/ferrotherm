@@ -468,3 +468,172 @@ fn network_matches_2r() {
     assert!((a - tj).abs() / (a - 40.0) < 0.02);
     assert!(b.report.energy_imbalance_pct.abs() < 1e-6);
 }
+
+/// Fully developed turbulent flow between parallel plates (H = 20 mm,
+/// U = 10 m/s, Re_H ≈ 12 600) with the standard k–ε model and wall
+/// functions, isothermal walls at 40 °C and air entering at 20 °C.
+/// References: Dean (1978) friction law for channels,
+/// C_f = 0.073 Re_H^(−1/4), and Gnielinski (1976) for the Nusselt number on
+/// the hydraulic diameter D_h = 2H (both plates heated).
+/// Returns (C_f, C_f Dean, Nu, Nu Gnielinski, max y* of the wall cells).
+fn ke_channel(cell_z_mm: f64) -> (f64, f64, f64, f64) {
+    let h = 0.02;
+    let u = 10.0;
+    let s = sim(&format!(
+        r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [1500, 1, 20]
+        material = "air"
+        [grid]
+        max_cell_mm = [10.0, 1.0, {cell_z_mm}]
+        [flow]
+        turbulence = "k_epsilon"
+        gravity = [0, 0, 0]
+        max_iterations = 1500
+        tolerance = 1e-5
+        relax_velocity = 0.6
+        [[boundaries]]
+        face = "xmin"
+        type = "inlet"
+        velocity_m_s = {u}
+        t_ambient_c = 20
+        [[boundaries]]
+        face = "xmax"
+        type = "opening"
+        t_ambient_c = 20
+        [[boundaries]]
+        face = "ymin"
+        type = "symmetry"
+        [[boundaries]]
+        face = "ymax"
+        type = "symmetry"
+        [[boundaries]]
+        face = "zmin"
+        type = "fixed"
+        t_c = 40
+        [[boundaries]]
+        face = "zmax"
+        type = "fixed"
+        t_c = 40
+    "#
+    ));
+    let out = s.run(|_| {}).unwrap();
+    let f = out.result.flow.as_ref().unwrap();
+    assert!(f.converged, "not converged: {:?}", f.residuals.last());
+    let snap = out.result.last();
+    let p = snap.p.as_ref().unwrap();
+    let vel = snap.vel.as_ref().unwrap();
+    let g = &s.model.grid;
+    let n = g.n();
+    let col = |x: f64| -> usize { (0..n[0]).find(|&i| g.nodes[0][i + 1] > x).unwrap() };
+    let (i1, i2) = (col(1.0), col(1.3));
+    let pavg = |i: usize| (0..n[2]).map(|k| p[g.idx(i, 0, k)] as f64).sum::<f64>() / n[2] as f64;
+    let dpdx = (pavg(i2) - pavg(i1)) / (g.center(0, i2) - g.center(0, i1));
+    let tau = -dpdx * h / 2.0;
+    let cf = tau / (0.5 * AIR_RHO * u * u);
+    let nu = AIR_MU / AIR_RHO;
+    let re_h = u * h / nu;
+    let cf_dean = 0.073 * re_h.powf(-0.25);
+    // bulk temperature (velocity weighted) at two stations
+    let tb = |i: usize| {
+        let (mut a, mut b) = (0.0, 0.0);
+        for k in 0..n[2] {
+            let w = vel[g.idx(i, 0, k)][0] as f64 * g.width(2, k);
+            a += w * snap.t[g.idx(i, 0, k)];
+            b += w;
+        }
+        a / b
+    };
+    let (t1, t2) = (tb(i1), tb(i2));
+    let dx = g.center(0, i2) - g.center(0, i1);
+    // per unit depth: ṁ cp dTb = h · 2 dx · ΔT_lm
+    let mdot = AIR_RHO * u * h;
+    let dtlm = ((40.0 - t1) - (40.0 - t2)) / ((40.0 - t1) / (40.0 - t2)).ln();
+    let hcoef = mdot * AIR_CP * (t2 - t1) / (2.0 * dx * dtlm);
+    let dh = 2.0 * h;
+    let nu_num = hcoef * dh / AIR_K;
+    let re = u * dh / nu;
+    let pr = AIR_MU * AIR_CP / AIR_K;
+    let ff = (0.79 * re.ln() - 1.64).powi(-2);
+    let nu_gn = (ff / 8.0) * (re - 1000.0) * pr
+        / (1.0 + 12.7 * (ff / 8.0).sqrt() * (pr.powf(2.0 / 3.0) - 1.0));
+    eprintln!(
+        "K-EPS CHANNEL dz {cell_z_mm} mm: it {} Cf {cf:.5} Dean {cf_dean:.5} ({:+.1} %), Nu {nu_num:.1} Gnielinski {nu_gn:.1} ({:+.1} %)",
+        f.iterations,
+        100.0 * (cf / cf_dean - 1.0),
+        100.0 * (nu_num / nu_gn - 1.0)
+    );
+    (cf, cf_dean, nu_num, nu_gn)
+}
+
+#[test]
+fn k_epsilon_channel_friction_and_heat() {
+    let (cf, cf_ref, nu, nu_ref) = ke_channel(2.0);
+    assert!((cf / cf_ref - 1.0).abs() < 0.15, "Cf {cf} vs {cf_ref}");
+    assert!((nu / nu_ref - 1.0).abs() < 0.20, "Nu {nu} vs {nu_ref}");
+}
+
+/// Wall-function results must not depend on the near-wall grid while the
+/// wall cells stay in the log layer (y* ≈ 18 … 75 here).
+#[test]
+fn k_epsilon_channel_grid_independence() {
+    let a = ke_channel(1.25);
+    let b = ke_channel(4.0);
+    assert!((a.0 / b.0 - 1.0).abs() < 0.05, "Cf {} vs {}", a.0, b.0);
+    assert!((a.2 / b.2 - 1.0).abs() < 0.05, "Nu {} vs {}", a.2, b.2);
+}
+
+/// k–ε on a 3D conjugate case: heated aluminium block in a duct. All the
+/// power must leave with the air (adiabatic walls, wall functions on the
+/// block faces and on the duct walls).
+#[test]
+fn k_epsilon_energy_balance() {
+    let s = sim(r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [200, 40, 30]
+        material = "air"
+        [grid]
+        max_cell_mm = 2.5
+        [flow]
+        turbulence = "k_epsilon"
+        max_iterations = 1500
+        tolerance = 1e-4
+        [[blocks]]
+        name = "heater"
+        material = "al-6061-t6"
+        min = [60, 10, 0]
+        max = [90, 30, 10]
+        power_w = 20.0
+        [[boundaries]]
+        face = "xmin"
+        type = "inlet"
+        velocity_m_s = 3.0
+        t_ambient_c = 25
+        [[boundaries]]
+        face = "xmax"
+        type = "opening"
+        t_ambient_c = 25
+    "#);
+    let out = s.run(|_| {}).unwrap();
+    let f = out.result.flow.as_ref().unwrap();
+    eprintln!(
+        "K-EPS 3D: converged {} it {} imbalance {:.3e} % advected {:.4} W, heater max {:.2} °C",
+        f.converged,
+        f.iterations,
+        out.report.energy_imbalance_pct,
+        out.report.advected_out_w,
+        out.report.blocks[0].t_max_c
+    );
+    assert!(f.converged);
+    assert_eq!(f.turbulence, "k-epsilon");
+    assert!(out.report.energy_imbalance_pct.abs() < 0.5);
+    // the block must run hotter than the mixed outlet air and cooler than
+    // the laminar-free-stream estimate h ≥ 10 W/m²K
+    let q = 3.0 * 0.04 * 0.03;
+    let dt_air = 20.0 / (AIR_RHO * AIR_CP * q);
+    let tmax = out.report.blocks[0].t_max_c;
+    let area = 2.0 * (0.03 * 0.01 + 0.02 * 0.01) + 0.03 * 0.02;
+    assert!(tmax > 25.0 + dt_air && tmax < 25.0 + 20.0 / (10.0 * area));
+}

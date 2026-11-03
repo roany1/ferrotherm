@@ -138,7 +138,9 @@ gli altri diventano blocchi di resina con la potenza distribuita nel volume.
    - **PCB map tile:** 10 mm va bene di solito. La scheda viene divisa in
      tessere, ognuna con la percentuale di rame di ogni strato e di via
      misurata dal disegno: un piano di massa pieno conduce molto più di una
-     zona di sole piste;
+     zona di sole piste. Le tessere sul bordo seguono il contorno reale
+     della scheda (forme a L, smussi, asole e fori di fissaggio grandi
+     restano aria);
    - **Components:** *2R compact* (consigliato);
    - **Load CSV…:** carica la lista potenze del punto 4.1;
    - **Height when unknown:** se il CAD non contiene le altezze, FerroTherm
@@ -197,6 +199,12 @@ contiene già tutto, oppure parti dal tuo modello.
    viscosità: se è `air-still` il programma propone il pulsante
    **Use 'air'**.
 3. Turbolenza **LVEL** (adatta all'elettronica), schema *Power law*.
+   **k–ε** (con wall function scalabili per attrito e scambio termico) è
+   indicato per flussi forzati pienamente turbolenti, con ventole e
+   condotti; in quel caso compare anche l'intensità turbolenta dell'aria in
+   ingresso (default 5 %). Su flussi lenti a basso Reynolds e griglie
+   grossolane k–ε sottostima lo scambio termico: lì resta preferibile LVEL
+   (vedi i limiti, §12).
 
 ### 5.2 Ventole
 
@@ -281,6 +289,39 @@ ventola all'interno è un salto di pressione.
    valore indicativo, segnalato nei messaggi).
 5. *Add to model*.
 
+### 6.1 Semplificare la meccanica (defeaturing)
+
+Prima di *Add to model* apri la sezione **Simplify geometry
+(defeaturing)** della stessa finestra. Lavora sui solidi CAD esatti con
+OpenCascade, quindi prima che diventino blocchi o voxel:
+
+- **Close holes ≤ Ø**: chiude fori passanti, ciechi, svasati e lamati
+  (il fondo del foro cieco e gli svasi vengono riconosciuti insieme al foro);
+- **Remove bosses / pins ≤ Ø**: toglie torrette, perni e distanziali, anche
+  forati;
+- **Remove fillets ≤ R** e **Remove chamfers ≤ larghezza**: riporta gli
+  spigoli vivi, così i voxel non creano gradini inutili;
+- **Drop small parts ≤ mm³**: scarta viti, dadi, rondelle, rivetti;
+- **Box nearly-box parts**: sostituisce con il parallelepipedo d'ingombro i
+  pezzi che lo riempiono almeno per la frazione indicata.
+
+*Simplify* esegue in background e sostituisce il modello mostrato con quello
+semplificato; la tabella riporta per ogni parte cosa è stato tolto, le facce
+prima/dopo e il volume. *Save simplified STEP…* salva il risultato. Nomi e
+posizioni dei pezzi dell'assieme restano quelli originali, e ogni pezzo
+ripetuto viene semplificato una volta sola. Se OpenCascade non riesce a
+togliere una certa feature, questa resta e viene contata come *kept*: il
+pezzo non viene mai lasciato rotto.
+
+Da riga di comando:
+
+```bash
+ferrotherm defeature chassis.step semplice.step --holes 8 --fillets 3 --chamfers 2 --small-parts 50
+```
+
+Vengono riconosciute le facce analitiche (cilindri, coni, tori, piani): un
+foro esportato come superficie B-spline non viene riconosciuto.
+
 La geometria di FerroTherm è fatta di blocchi allineati agli assi: le
 superfici inclinate o curve diventano a gradini. Per schede e componenti
 con potenza è meglio importare i dati ECAD (tutorial A) e usare lo STEP solo
@@ -323,14 +364,20 @@ gruppi. Gli oggetti segnati "non installati" in Celsius vengono saltati.
   geometrie sottili (guide delle schede) e possono cambiare il risultato;
   la bounding box riempirebbe di alluminio un contenitore cavo.
 - I componenti "Detailed" (package con die, substrato, sfere…) vengono
-  importati come un unico blocco con la potenza delle loro parti interne:
-  la temperatura del die non è risolta (il blocco ne dà una media).
-- Le schede poligonali usano il rettangolo che contiene il contorno
-  (`Outline`); le dimensioni Width/Depth salvate da Celsius per queste schede
-  possono essere vecchie.
+  importati come corpo del package più le sue parti interne, ognuna con il
+  suo materiale e la sua potenza: la temperatura del die è risolta e compare
+  nella tabella dei blocchi (`U1/die`). Il file Celsius non dice in quale
+  sistema di riferimento sono scritte le posizioni delle parti interne:
+  l'import prova angolo del package, scheda e chassis, usa il primo in cui
+  tutte le parti stanno dentro il corpo e lo scrive negli avvisi. Se nessuno
+  va bene, o se il package è ruotato sulla scheda o contiene solidi CAD,
+  torna al blocco unico con la potenza totale.
+- Le schede poligonali mantengono il loro contorno (`Outline`): appartengono
+  alla scheda solo le celle con il centro dentro il poligono.
 - Gli oggetti non ancora supportati (ventole, vent, cold plate, sensori…)
   sono elencati negli avvisi della finestra di import.
-- La turbolenza k-ε di Celsius diventa LVEL (segnalato).
+- La turbolenza k-ε di Celsius diventa k–ε; gli altri modelli diventano
+  LVEL (segnalato).
 - Il formato è stato ricostruito da file salvati con le versioni 17.44 e
   2024.36: non è una specifica ufficiale.
 
@@ -370,6 +417,7 @@ ferrotherm import meccanica.step --into box.toml --shape voxel:1 --material al-6
 ferrotherm import gerber.zip --into box.toml --origin 10,10,10
 ferrotherm check box.toml                          # verifica il modello e la griglia
 ferrotherm run box.toml -o risultati               # risolve e scrive i risultati
+ferrotherm defeature meccanica.step semplice.step --holes 8 --fillets 3
 ferrotherm export box.toml box.step                # anche .stl e .emn
 ferrotherm materials | packages | finishes | environments | deratings
 ferrotherm pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
@@ -411,8 +459,14 @@ Una voce con un `id` già esistente sostituisce quella predefinita.
 - **Studio di griglia:** confronta sempre almeno due griglie.
 - **Bilancio energetico:** potenza entrante e calore uscente devono
   coincidere; lo sbilancio è nella riga riassuntiva dei risultati.
-- **Turbolenza:** solo LVEL o laminare; niente k-ε per ora.
-- **Geometria:** solo blocchi allineati agli assi.
+- **Turbolenza:** LVEL, k–ε standard o laminare (niente k-ω/SST per ora).
+  k–ε con wall function è pensato per flussi forzati turbolenti: in un canale
+  dà C_f −11 % e Nu +4 % rispetto alle correlazioni di Dean e Gnielinski.
+  Su un blocco scaldato a 3 m/s (Re ≈ 5600, di fatto laminare) sottostima lo
+  scambio con celle grossolane (587 °C con celle da 2,5 mm, 340 °C con 1 mm;
+  LVEL 245 / 302 °C): per l'elettronica a bassa velocità resta LVEL.
+- **Geometria:** blocchi allineati agli assi; i contorni poligonali (schede
+  di forma qualsiasi, asole) sono risolti al centro delle celle.
 - **Calcolo:** solo su CPU (multithread), niente GPU.
 - **IPC-2581 e ODB++:** verificati su file con la struttura di quelli
   esportati da KiCad; segnala i file di altri CAD che non vengono letti.

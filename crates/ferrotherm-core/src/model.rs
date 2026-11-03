@@ -256,6 +256,8 @@ impl Model {
             hi: [f64; 3],
             mat: u32,
             refine: Option<(usize, usize)>,
+            /// Outline rings (m) in the plane normal to the axis.
+            outline: Option<(usize, Vec<Vec<[f64; 2]>>)>,
         }
         let blocks_all = all_blocks(case)?;
         let mut block_boxes = Vec::new();
@@ -297,11 +299,28 @@ impl Model {
                 Some(stack) => Some((stack.normal_axis()?, PCB_MIN_CELLS)),
                 None => None,
             };
+            let outline = match &b.outline {
+                Some(rings) => {
+                    if rings.iter().all(|r| r.len() < 3) {
+                        return Err(Error::Invalid(format!(
+                            "block '{}': the outline needs a ring of at least 3 points",
+                            b.name
+                        )));
+                    }
+                    let rm: Vec<Vec<[f64; 2]>> = rings
+                        .iter()
+                        .map(|r| r.iter().map(|p| [p[0] * MM, p[1] * MM]).collect())
+                        .collect();
+                    Some((b.outline_normal()?, rm))
+                }
+                None => None,
+            };
             block_boxes.push(BoxDef {
                 lo: blo,
                 hi: bhi,
                 mat: mi,
                 refine,
+                outline,
             });
         }
 
@@ -491,6 +510,15 @@ impl Model {
         };
         for (bi, b) in block_boxes.iter().enumerate() {
             paint(b.lo, b.hi, &mut |c| {
+                if let Some((a, rings)) = &b.outline {
+                    let p = grid.ijk(c);
+                    let t = tangential(*a);
+                    let u = grid.center(t[0], p[t[0]]);
+                    let v = grid.center(t[1], p[t[1]]);
+                    if !crate::case::point_in_rings(rings, u, v) {
+                        return;
+                    }
+                }
                 owner[c] = Owner::Block(bi);
                 cell_material[c] = b.mat;
             });
