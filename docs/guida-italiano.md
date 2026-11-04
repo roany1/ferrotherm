@@ -337,8 +337,13 @@ contenitore e pareti, ambiente (temperatura, coefficiente di scambio
 esterno, irraggiamento), fluido, impostazioni del solutore (flusso,
 gravità, turbolenza, iterazioni), materiali con i loro valori, schede
 multistrato, componenti 2R (θJC/θJB) o a blocco con la potenza, dissipatori
-estrusi, gap pad, ostacoli (parallelepipedi e solidi CAD, voxelizzati) e
-gruppi. Gli oggetti segnati "non installati" in Celsius vengono saltati.
+estrusi (con i tagli nelle alette), gap pad, ostacoli (parallelepipedi e
+solidi CAD, voxelizzati) e gruppi. Per i modelli da rack: ventole e vent
+nelle pareti (con curva P–Q in m³/s o cfm e perdita della lamiera forata),
+alimentatori, Chassis_Bay con i server negli slot (anche ruotati),
+Card_Bay con schede e backplane, Drive_Bay con i dischi, socket dei chip
+(con il chip centrato) e socket delle schede figlie (DIMM). Gli oggetti
+segnati "non installati" in Celsius vengono saltati.
 
 - **Open as new model** sostituisce il modello corrente; **Add to current
   model** aggiunge solo oggetti e materiali.
@@ -382,8 +387,28 @@ gruppi. Gli oggetti segnati "non installati" in Celsius vengono saltati.
   0,65 a 1,3 milioni di celle).
 - Le schede poligonali mantengono il loro contorno (`Outline`): appartengono
   alla scheda solo le celle con il centro dentro il poligono.
-- Gli oggetti non ancora supportati (ventole, vent, cold plate, sensori…)
-  sono elencati negli avvisi della finestra di import.
+- **Convenzioni dei modelli da rack**, verificate sull'export STEP del
+  tutorial "Full Enclosure" di Celsius (tutte le 1300 parti solide, le 16
+  ventole e i 36 vent coincidono entro 2 µm): la parete Front è a Z
+  massimo e Rear a Z = 0; gli offset dei vent sono l'angolo, quelli delle
+  ventole il centro; il piano della ventola è sulla faccia interna del suo
+  box; il calore dichiarato della ventola va nel mozzo; i vent sulle pareti
+  esterne diventano aperture con la perdita della lamiera forata, quelli
+  interni resistenze piane. L'interno dell'alimentatore (blocco interno
+  percentuale) è reso con 10 piastre riscaldate lungo il flusso: è
+  un'approssimazione. Le pareti dei bay, che Celsius tratta a spessore
+  nullo, hanno qui il loro spessore verso l'interno. I TIM senza spessore
+  non sono modellati: l'avviso riporta il ΔT che trascurano (P·R).
+- **Griglia nei modelli grandi:** la griglia di FerroTherm è conforme (ogni
+  piano attraversa tutto il dominio). Un rack ha migliaia di piani: usa
+  *Merge planes closer than* (`merge_mm`, sotto lo spessore delle parti
+  più sottili, per esempio 0,9 mm con alette da 1 mm) e *Cells through
+  boards* (`pcb_cells` = 1 dove le schede non sono il percorso termico
+  principale). Sul tutorial da rack si passa da 12,8 a 2,4 milioni di
+  celle.
+- Gli oggetti non ancora supportati (cold plate, sensori, ventole e vent
+  isolati non su una parete…) sono elencati negli avvisi della finestra di
+  import.
 - La turbolenza k-ε di Celsius diventa k–ε; gli altri modelli diventano
   LVEL (segnalato).
 - Il formato è stato ricostruito da file salvati con le versioni 17.44 e

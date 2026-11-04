@@ -44,7 +44,7 @@ limitations below.
 | Components | 2-resistor (θJC/θJB) and DELPHI-style multi-node compact models (top/bottom inner/outer, sides, leads); Tj, case and board temperatures, heat split per surface; PASS/FAIL against SD-18 derating or a user limit |
 | PCB | Layered effective-conductivity stack; from ECAD data the board becomes a map of tiles, each with the copper coverage of every layer and the plated-via fraction measured from the artwork; any board shape (polygon outline with cut-outs, also on blocks in general) |
 | Solvers | BiCGSTAB/PCG with additive-correction multigrid; relative residuals plus a "temperatures settled" convergence check on junctions and monitor points; exact global energy balance reported |
-| CAD import | STEP AP203/214/242 (B-rep imported and tessellated by OpenCascade 8, compiled to WebAssembly, with assembly names and placements), STL, IDF 3.0, KiCad `.kicad_pcb` (v5–v9), Gerber X2/RS-274X + Excellon (+ job file), IPC-2581, ODB++ (folder or `.tgz/.zip`, `.Z` files), power list CSV; complete **Cadence Celsius EC Solver** models (`.equipment`: chassis, environment, materials with surface emissivity, radiation settings, PCBs in any 90° orientation with their parts, 2R components, heat sinks, obstructions and CAD solids; "Detailed" packages split into body, die, substrate…) |
+| CAD import | STEP AP203/214/242 (B-rep imported and tessellated by OpenCascade 8, compiled to WebAssembly, with assembly names and placements), STL, IDF 3.0, KiCad `.kicad_pcb` (v5–v9), Gerber X2/RS-274X + Excellon (+ job file), IPC-2581, ODB++ (folder or `.tgz/.zip`, `.Z` files), power list CSV; complete **Cadence Celsius EC Solver** models (`.equipment`: chassis, environment, materials with surface emissivity, radiation settings, PCBs in any 90° orientation with their parts, 2R components, heat sinks, obstructions and CAD solids; "Detailed" packages split into body, die, substrate…; rack models: fans and vents in walls, power supplies, chassis bays with servers in slots, card bays, drive bays, chip and DIMM sockets, heat sinks with cutouts) |
 | CAD clean-up | Defeaturing editor on the exact B-rep (OpenCascade `BRepAlgoAPI_Defeaturing`), GUI and CLI: close through/blind/countersunk/counterbored holes, remove bosses, pins and standoffs, fillets and rounds, chamfers; drop small parts (screws, nuts); replace nearly box-shaped parts by their box; names and placements of the assembly kept, simplified STEP saved |
 | Export | STEP (AP214 solids), STL, IDF 3.0 board (outline and cut-outs) + library, VTK (`.vtr/.pvd`: temperature, velocity, speed, pressure, material, power density), `report.md/json`, `components.csv`, `blocks.csv`, `junctions.csv` |
 | Libraries | 39 materials, finishes, 19 packages (incl. MIL-HDBK-217F θJC defaults), MIL-STD-810H environments, SD-18 derating rules — every entry with its source; extendable with your own JSON |
@@ -138,6 +138,7 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | Turbulent channel, k–ε + wall functions (H = 20 mm, Re_H ≈ 12 600, wall cells y* ≈ 18…75) | Dean (1978) C_f, Gnielinski (1976) Nu | C_f −11 % (log law alone gives −5 %), Nu +3 … +5 %; grid-independent within 3 % |
 | k–ε, heated block in a duct (3D, conjugate) | Energy balance | imbalance < 0.01 % |
 | L-shaped board with a hole (polygon outline) | Exact area, power, export/re-import (STL, IDF with cut-out) | area 5900 mm² exact on a matching grid, all power in the board |
+| Celsius "Full Enclosure" rack tutorial (2024.36): 16 blade servers in 4 chassis bays, card bay, power supply, 16 fans, 36 vents | STEP export of the same model made by Celsius | every solid part (16 chips, 16 sockets, 880 heat-sink pieces, 132 sockets, 149 boards, 96 drive pieces, walls), the 16 fans and the 36 vents within 2 µm |
 | Celsius "Detailed" package (synthetic) | Hand-placed die and substrate | die and substrate at their place in either frame; fallback to one block when the parts fit no frame |
 | Defeaturing: plate with through, blind and counterbored holes, a boss, fillets; chassis shell with 12 vents, 4 screw holes and filleted edges; chamfered cover; two-instance assembly | Exact volumes | plain plate 24 000 mm³, shell 48 992 mm³, cover 15 000 mm³ (all exact); instance names and placements kept |
 | FerroTherm STEP/IDF/STL export | Re-import (OpenCascade for STEP) | boxes recovered within 1e-4 mm |
@@ -176,10 +177,16 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
   Rotations combining several axes, tilted boards and parts rotated on the
   board use conventions not verified yet and are flagged; objects that land
   outside the chassis are listed in the import warnings. "Detailed" packages
-  are split into their parts when every part fits the package body in one
-  of three frames (package corner, board, chassis); which frame Celsius
-  actually uses is not yet checked on a real model, so the import says
-  which one it took.
+  are split into their parts (on the real models the parts are placed from
+  the package corner); arrays of solder balls become one equivalent layer.
+  Rack models: the conventions (sides, vent and fan offsets, slot
+  rotation, sockets, drives) are checked on one Celsius tutorial; the
+  power-supply internals are approximated by heated plates, zero-thickness
+  bay sides get their thickness inside the bay, TIMs without thickness are
+  not modelled (the warning gives the ΔT neglected), card bays with slots
+  side by side and parts on the bottom side of a socket are not imported
+  yet. A rack has thousands of geometry planes: use `grid.merge_mm` and
+  `grid.pcb_cells` to keep the conforming grid affordable.
 - **IDF** is imported with board outline, placements and part outlines/heights
   (no copper): combine with Gerber/ODB++ for the copper map.
 - Missing part heights are guessed from the package name and listed as a

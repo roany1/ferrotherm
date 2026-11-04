@@ -304,13 +304,30 @@ pub fn grid_settings(ui: &mut Ui, g: &mut GridSettings, info: Option<&str>) {
         ui.label("Min cells per interval");
         ui.add(DragValue::new(&mut g.min_cells_per_interval).range(1..=20));
         ui.end_row();
+        ui.label("Cells through boards");
+        ui.add(DragValue::new(&mut g.pcb_cells).range(1..=8))
+            .on_hover_text("Cells across the thickness of every PCB (default 4)");
+        ui.end_row();
+        ui.label("Merge planes closer than");
+        ui.add(
+            DragValue::new(&mut g.merge_mm)
+                .speed(0.01)
+                .range(0.0..=5.0)
+                .suffix(" mm"),
+        )
+        .on_hover_text(
+            "Near-coincident faces (a 1 mm wall beside a 2 mm wall…) otherwise add thin cells \
+             across the whole domain. Keep it below the thinnest part that matters (fins, walls).",
+        );
+        ui.end_row();
     });
     ui.add_space(6.0);
     ui.label(
         RichText::new(
-            "The grid always contains every block, component and boundary-region plane; \
-             boards get at least 4 cells through their thickness. Start coarse (3-4 mm), \
-             then refine and check that junction temperatures stop changing.",
+            "The grid always contains every block, component and boundary-region plane \
+             (minus the merged ones); boards get the chosen number of cells through their \
+             thickness. Start coarse (3-4 mm), then refine and check that junction \
+             temperatures stop changing.",
         )
         .weak(),
     );

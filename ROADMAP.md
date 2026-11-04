@@ -26,7 +26,9 @@ Done and validated (see README → Verification):
 - CAD import: STEP (OpenCascade), STL, IDF, KiCad, Gerber/Excellon,
   IPC-2581, ODB++, Cadence Celsius `.equipment` (chassis, boards in any 90°
   orientation, parts, heat sinks, obstructions, CAD solids, polygon boards,
-  **Detailed packages split into body and internal parts**).
+  Detailed packages split into body and internal parts with the Celsius
+  minimum cells, rack models: wall fans and vents, power supplies, chassis
+  bays with servers, card bays, drive bays, chip and DIMM sockets).
 - **CAD defeaturing editor** (OpenCascade B-rep): holes, bosses, fillets,
   chamfers, small parts, box replacement; GUI and CLI.
 - Export: STEP, STL, IDF (with cut-outs), VTK, CSV, Markdown/JSON report.
@@ -40,8 +42,9 @@ Done and validated (see README → Verification):
   - the frame of the internal-part locations of "Detailed" packages (today
     three frames are tried and the import reports which one fitted);
   - numerical comparison of a second model against Celsius temperatures.
-- Import fans (curve and fixed flow), vents/grilles, cold plates, sensors,
-  thermal interface materials as surfaces.
+- Import cold plates, sensors, fans and vents not mounted on a wall, card
+  bays with slots side by side, thermal interface materials (contact
+  resistances: needs a contact-resistance model in the core).
 - Done when: every object of the two reference models is imported, the
   comparison table covers both, no "not supported" warnings remain on them.
 

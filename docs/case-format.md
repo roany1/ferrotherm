@@ -27,6 +27,8 @@ their centre.
 |---|---|---|
 | `max_cell_mm` | 2.0 | Scalar or `[dx, dy, dz]` |
 | `min_cells_per_interval` | 1 | Minimum cells between two consecutive geometry planes |
+| `pcb_cells` | 4 | Cells across the thickness of every PCB block |
+| `merge_mm` | 0 | Geometry planes closer than this are merged (0 = off): near-coincident faces otherwise add thin cells across the whole domain. Keep it below the thinnest part that matters (fins, walls); a block thinner than it can come out a cell thinner or thicker |
 
 The grid always contains every block, component and boundary-region plane.
 PCB blocks get at least 4 cells through their thickness.

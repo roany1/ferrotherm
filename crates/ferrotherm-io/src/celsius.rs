@@ -170,6 +170,8 @@ fn len_mm(s: &str) -> Option<f64> {
             "in" | "inch" | "\"" => 25.4,
             "ft" => 304.8,
             "mil" | "thou" => 0.0254,
+            // rack units (EIA-310)
+            "U" | "u" | "RU" => 44.45,
             _ => return None,
         },
     )
@@ -219,10 +221,14 @@ fn deg(s: &str) -> Option<f64> {
 
 /// Celsius curve "x1,y1, x2,y2 <unitx,unity>" → points.
 fn curve(s: &str) -> Vec<[f64; 2]> {
+    // "x,y, x,y <ux,uy>": the unit tag may arrive as "&lt;ux,uy&gt;" (the
+    // XML reader keeps entities), so each value is the leading number of
+    // its comma-separated token
     let body = s.split('<').next().unwrap_or("");
+    let body = body.split("&lt;").next().unwrap_or("");
     let nums: Vec<f64> = body
         .split(',')
-        .filter_map(|t| t.trim().parse().ok())
+        .filter_map(|t| split(t).map(|x| x.0))
         .collect();
     nums.chunks_exact(2).map(|c| [c[0], c[1]]).collect()
 }
@@ -309,6 +315,9 @@ impl Frame {
 
 struct Ctx {
     f: Frame,
+    /// Frame of the chassis (bay, slot…) being read, in the top-level
+    /// Celsius frame: object locations are local to it.
+    base: Pose,
     mats: HashMap<String, String>,
     /// FerroTherm material id → surface emissivity of the Celsius material.
     eps: HashMap<String, f64>,
@@ -319,6 +328,11 @@ struct Ctx {
     skipped: BTreeMap<String, usize>,
     uninstalled: usize,
     names: HashMap<String, usize>,
+    /// Name prefix of the objects being read (bay/slot of a nested server).
+    prefix: String,
+    /// Openings found on the domain faces (vents, fans in outer walls),
+    /// appended after the whole-face boundaries so that they win.
+    openings: Vec<Boundary>,
 }
 
 impl Ctx {
@@ -328,11 +342,19 @@ impl Ctx {
     fn skip(&mut self, k: &str) {
         *self.skipped.entry(k.to_string()).or_default() += 1;
     }
+    fn pref(&self, base: &str) -> String {
+        if self.prefix.is_empty() {
+            base.to_string()
+        } else {
+            format!("{}/{base}", self.prefix)
+        }
+    }
     fn unique(&mut self, base: &str) -> String {
-        let n = self.names.entry(base.to_string()).or_default();
+        let base = self.pref(base);
+        let n = self.names.entry(base.clone()).or_default();
         *n += 1;
         if *n == 1 {
-            base.to_string()
+            base
         } else {
             format!("{base}~{n}")
         }
@@ -340,9 +362,6 @@ impl Ctx {
     fn mat(&self, link: Option<&str>, fallback: &str) -> String {
         link.and_then(|l| self.mats.get(l.trim()).cloned())
             .unwrap_or_else(|| fallback.to_string())
-    }
-    fn block(&mut self, name: &str, mat: String, lo: V3, hi: V3, power: f64) {
-        self.block_in(&Pose::ID, name, mat, lo, hi, power);
     }
     /// Celsius minimum cell counts (local width x, depth z) of the last
     /// block if it is `name`, mapped to the FerroTherm axes.
@@ -352,9 +371,14 @@ impl Ctx {
             return;
         };
         // the block was not pushed (degenerate) when the last one is another
-        let own = b.name == name_prefix
+        let full = if self.prefix.is_empty() {
+            name_prefix.to_string()
+        } else {
+            format!("{}/{name_prefix}", self.prefix)
+        };
+        let own = b.name == full
             || b.name
-                .strip_prefix(name_prefix)
+                .strip_prefix(full.as_str())
                 .is_some_and(|r| r.starts_with('~'));
         if !own {
             return;
@@ -388,12 +412,20 @@ impl Ctx {
             min_cells: None,
         });
     }
-    /// Block given in the local frame of `pose`.
-    fn block_in(&mut self, pose: &Pose, name: &str, mat: String, lo: V3, hi: V3, power: f64) {
+    /// Block given in the local frame of `pose`; false when degenerate.
+    fn block_in(
+        &mut self,
+        pose: &Pose,
+        name: &str,
+        mat: String,
+        lo: V3,
+        hi: V3,
+        power: f64,
+    ) -> bool {
         let (lo, hi) = pose.bx(lo, hi);
         let (a, b) = self.f.bx(lo, hi);
         if (0..3).any(|k| b[k] - a[k] <= 1e-9) {
-            return;
+            return false;
         }
         let name = self.unique(name);
         let emissivity = self.eps.get(&mat).copied();
@@ -410,8 +442,63 @@ impl Ctx {
             outline_axis: None,
             min_cells: None,
         });
+        true
+    }
+    /// Block (local box of `pose`) with holes: polygons in the local plane
+    /// normal to the local `axis` (points given in local 3D coordinates).
+    #[allow(clippy::too_many_arguments)]
+    fn block_holes(
+        &mut self,
+        pose: &Pose,
+        name: &str,
+        mat: String,
+        lo: V3,
+        hi: V3,
+        axis: usize,
+        holes: &[Vec<V3>],
+    ) {
+        if !self.block_in(pose, name, mat, lo, hi, 0.0) || holes.is_empty() {
+            return;
+        }
+        let (ca, sg) = pose.axis(axis);
+        let fa = ft_axis(ca, sg).0;
+        let tg = ferrotherm_core::model::tangential(fa);
+        let ring: Vec<Vec<[f64; 2]>> = holes
+            .iter()
+            .map(|h| {
+                h.iter()
+                    .map(|p| {
+                        let w = self.f.p(pose.apply(*p));
+                        [w[tg[0]], w[tg[1]]]
+                    })
+                    .collect()
+            })
+            .collect();
+        let b = self.case.blocks.last_mut().unwrap();
+        let mut rings = vec![vec![
+            [b.min[tg[0]], b.min[tg[1]]],
+            [b.max[tg[0]], b.min[tg[1]]],
+            [b.max[tg[0]], b.max[tg[1]]],
+            [b.min[tg[0]], b.max[tg[1]]],
+        ]];
+        rings.extend(ring);
+        b.outline = Some(rings);
+        b.outline_axis = Some(AXIS_NAME[fa].to_string());
+    }
+    /// The domain face a FerroTherm plane (axis, coordinate mm) lies on.
+    fn domain_face(&self, a: usize, c: f64) -> Option<Face> {
+        let d = &self.case.domain;
+        if (c - d.min[a]).abs() < 1e-6 {
+            Some([Face::Xmin, Face::Ymin, Face::Zmin][a])
+        } else if (c - d.max[a]).abs() < 1e-6 {
+            Some([Face::Xmax, Face::Ymax, Face::Zmax][a])
+        } else {
+            None
+        }
     }
 }
+
+mod rack;
 
 fn slug(s: &str) -> String {
     let mut o = String::new();
@@ -629,6 +716,17 @@ struct Pose {
 
 impl Pose {
     const ID: Pose = Pose { r: I3, t: [0.0; 3] };
+    /// `self` after `inner`: p ↦ self(inner(p)).
+    fn then(&self, inner: &Pose) -> Pose {
+        let t = mv3(&self.r, inner.t);
+        Pose {
+            r: mul3(&self.r, &inner.r),
+            t: [t[0] + self.t[0], t[1] + self.t[1], t[2] + self.t[2]],
+        }
+    }
+    fn translated(&self, d: V3) -> Pose {
+        self.then(&Pose { r: I3, t: d })
+    }
     fn apply(&self, p: V3) -> V3 {
         let q = mv3(&self.r, p);
         [q[0] + self.t[0], q[1] + self.t[1], q[2] + self.t[2]]
@@ -676,6 +774,7 @@ const AXIS_NAME: [&str; 3] = ["x", "y", "z"];
 
 /// Board frame: local x across the width, y through the thickness (top
 /// side at y = t), z along the depth; origin at the placement point.
+#[derive(Clone, Copy)]
 struct BoardRef {
     pose: Pose,
     t: f64,
@@ -778,7 +877,7 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
             };
             (b.pose, [x0, ylo, z0], [x0 + w, yhi, z0 + d])
         }
-        None => (Pose::ID, [x0, y, z0], [x0 + w, y + h, z0 + d]),
+        None => (ctx.base, [x0, y, z0], [x0 + w, y + h, z0 + d]),
     };
     // board normal (local +y) in FerroTherm axes; the case faces away from the board
     let (cax, csign) = pose.axis(1);
@@ -819,11 +918,11 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
                     ctx.min_cells_last(&pose, &name, min_cells_of(n));
                     let np = list.len();
                     for p in list {
-                        let pose_p = if p.chassis { Pose::ID } else { pose };
+                        let pose_p = if p.chassis { ctx.base } else { pose };
                         let pname = format!("{name}/{}", p.name);
                         match p.fill {
                             PartFill::Mat(m) => {
-                                ctx.block_in(&pose_p, &pname, m, p.lo, p.hi, p.power)
+                                ctx.block_in(&pose_p, &pname, m, p.lo, p.hi, p.power);
                             }
                             PartFill::Pcb(st) => {
                                 ctx.block_pcb_in(&pose_p, &pname, st, p.lo, p.hi, p.power)
@@ -834,6 +933,7 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
                     ctx.warnings.push(format!(
                         "component {name}: detailed package resolved into its body and {np} internal part(s), {inner_power} W in the parts (placement: {convention})"
                     ));
+                    rack::component_extras(ctx, n, &pose, lo, hi, bottom, power + inner_power);
                     return;
                 }
                 Err(why) => {
@@ -892,6 +992,7 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         ctx.block_in(&pose, &name, mat, lo, hi, power);
         ctx.min_cells_last(&pose, &name, min_cells_of(n));
     }
+    rack::component_extras(ctx, n, &pose, lo, hi, bottom, power);
 }
 
 /// Celsius "Minimum Number Of Cells" (width, depth) of an object, if any
@@ -1232,7 +1333,35 @@ fn heatsink(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         .and_then(val)
         .unwrap_or(0.0)
         .max(0.0) as usize;
-    let fd = mm(g, "Fin_Depth").unwrap_or(bd).min(bd);
+    // extruded fins run over the whole base depth (Fin_Depth belongs to
+    // the pin shapes): checked against the STEP export of a Celsius 2024.36
+    // model, whose 50 mm deep heat sinks store Fin_Depth = 35 mm
+    let fd = bd;
+    // rectangular cutouts through the fins: (x0, x1, z0, z1) in the base frame
+    let mut cuts: Vec<[f64; 4]> = Vec::new();
+    if let Some(l) = at(n, "Cutouts") {
+        for c in l.children("Heatsink_Cutout").filter(|c| installed(c)) {
+            let shape = txt(c, "Geometry/Shape").unwrap_or("Rectangle");
+            if !shape.eq_ignore_ascii_case("Rectangle") {
+                ctx.warnings.push(format!(
+                    "heat sink {}: cutout shape '{shape}' ignored",
+                    name_of(n)
+                ));
+                continue;
+            }
+            if yes(c, "Geometry/Cutout_Heatsink_Base") {
+                ctx.warnings.push(format!(
+                    "heat sink {}: cutout through the base not modelled (fins only)",
+                    name_of(n)
+                ));
+            }
+            let x0 = mm(c, "Placement/X_Offset").unwrap_or(0.0);
+            let z0 = mm(c, "Placement/Z_Offset").unwrap_or(0.0);
+            let w = mm(c, "Geometry/Width").unwrap_or(0.0);
+            let d = mm(c, "Geometry/Depth").unwrap_or(0.0);
+            cuts.push([x0, x0 + w, z0, z0 + d]);
+        }
+    }
     if !typ.eq_ignore_ascii_case("Extruded") {
         ctx.warnings.push(format!(
             "heat sink {name}: type '{typ}' imported as an extruded (plate-fin) heat sink"
@@ -1255,7 +1384,7 @@ fn heatsink(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         Some(b) if bottom => (b.pose, x0, -yoff, z0, -1.0),
         Some(b) => (b.pose, x0, b.t + yoff, z0, 1.0),
         None => (
-            Pose::ID,
+            ctx.base,
             mm(n, "Placement/X_Location").unwrap_or(0.0),
             mm(n, "Placement/Y_Location").unwrap_or(0.0),
             mm(n, "Placement/Z_Location").unwrap_or(0.0),
@@ -1293,14 +1422,44 @@ fn heatsink(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
             } else {
                 bx + 0.5 * (bw - ft)
             };
-            ctx.block_in(
-                &pose,
-                &format!("{name}/fin{}", i + 1),
-                fin_mat.clone(),
-                [xf, f0, zf],
-                [xf + ft, f1, zf + fd],
-                0.0,
-            );
+            // depth intervals of the fin left by the cutouts
+            let mut segs = vec![(zf, zf + fd)];
+            for c in &cuts {
+                let (cx0, cx1) = (bx + c[0], bx + c[1]);
+                if cx1 <= xf + 1e-9 || cx0 >= xf + ft - 1e-9 {
+                    continue;
+                }
+                let (cz0, cz1) = (bz + c[2], bz + c[3]);
+                segs = segs
+                    .into_iter()
+                    .flat_map(|(a, b)| {
+                        let mut v = Vec::new();
+                        if cz0 > a {
+                            v.push((a, cz0.min(b)));
+                        }
+                        if cz1 < b {
+                            v.push((cz1.max(a), b));
+                        }
+                        v
+                    })
+                    .filter(|(a, b)| b - a > 1e-9)
+                    .collect();
+            }
+            for (k, (z0, z1)) in segs.iter().enumerate() {
+                let fname = if segs.len() == 1 {
+                    format!("{name}/fin{}", i + 1)
+                } else {
+                    format!("{name}/fin{}.{}", i + 1, k + 1)
+                };
+                ctx.block_in(
+                    &pose,
+                    &fname,
+                    fin_mat.clone(),
+                    [xf, f0, *z0],
+                    [xf + ft, f1, *z1],
+                    0.0,
+                );
+            }
         }
     }
 }
@@ -1321,7 +1480,7 @@ fn gap_pad(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         mm(n, "Placement/Z_Location").unwrap_or(0.0),
     ];
     // offsets from the board placement point in the board frame
-    let pose = board.map(|b| b.pose).unwrap_or(Pose::ID);
+    let pose = board.map(|b| b.pose).unwrap_or(ctx.base);
     let lo = p;
     let mat = ctx.mat(
         txt(n, "Cooling/MaterialLink").or_else(|| txt(n, "Construction/MaterialLink")),
@@ -1440,14 +1599,14 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
             "PCB {name}: tilted (not a multiple of 90°), imported as its axis-aligned bounding box"
         ));
     }
-    let pose = Pose {
+    let pose = ctx.base.then(&Pose {
         r,
         t: [
             mm(n, "Placement/X_Location").unwrap_or(0.0),
             y,
             mm(n, "Placement/Z_Location").unwrap_or(0.0),
         ],
-    };
+    });
     let (nax, _) = pose.axis(1);
     let normal = ft_axis(nax, 1.0).0;
     let stack = stack_of(ctx, at(n, "Construction"), t, normal);
@@ -1489,6 +1648,12 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
         min_cells: None,
     });
     let board = BoardRef { pose, t };
+    board_contents(ctx, n, &board);
+}
+
+/// Parts mounted on a board (any board: PCB, daughter card, DIMM).
+fn board_contents(ctx: &mut Ctx, n: &XNode, board: &BoardRef) {
+    let board = *board;
     for (list, item) in [
         ("Components", "Component"),
         ("Heatsinks", "Heatsink"),
@@ -1504,7 +1669,17 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
             }
         }
     }
-    for other in ["TIMs", "Holes", "Batteries", "Chip_Sockets"] {
+    if let Some(l) = at(n, "Chip_Sockets") {
+        for c in l.children("Chip_Socket") {
+            rack::chip_socket(ctx, c, &board);
+        }
+    }
+    if let Some(l) = at(n, "Daughter_Board_Sockets") {
+        for c in l.children("Daughter_Board_Socket") {
+            rack::board_socket(ctx, c, &board);
+        }
+    }
+    for other in ["TIMs", "Holes", "Batteries"] {
         if let Some(l) = at(n, other) {
             for c in l.children.iter().filter(|c| !c.children.is_empty()) {
                 if installed(c) {
@@ -1665,7 +1840,9 @@ fn obstruction(ctx: &mut Ctx, n: &XNode, cad: &Cad) {
                     for m in &chain {
                         p = apply(m, p);
                     }
-                    ctx.f.p([p[0] + at_[0], p[1] + at_[1], p[2] + at_[2]])
+                    ctx.f.p(ctx
+                        .base
+                        .apply([p[0] + at_[0], p[1] + at_[1], p[2] + at_[2]]))
                 })
             })
             .collect();
@@ -1722,14 +1899,14 @@ fn obstruction(ctx: &mut Ctx, n: &XNode, cad: &Cad) {
                 "obstruction {name}: tilted (not a multiple of 90°), imported as its axis-aligned bounding box"
             ));
         }
-        let pose = Pose {
+        let pose = ctx.base.then(&Pose {
             r,
             t: [
                 mm(n, "Placement/X_Location").unwrap_or(0.0),
                 mm(n, "Placement/Y_Location").unwrap_or(0.0),
                 mm(n, "Placement/Z_Location").unwrap_or(0.0),
             ],
-        };
+        });
         ctx.block_in(&pose, &name, mat, p, [p[0] + w, p[1] + h, p[2] + d], power);
     }
 }
@@ -1769,22 +1946,33 @@ fn chassis(ctx: &mut Ctx, ch: &XNode, cad: &Cad, top: bool) {
         mm(ch, "Placement/Y_Location").unwrap_or(0.0),
         mm(ch, "Placement/Z_Location").unwrap_or(0.0),
     ];
+    let (r, note) = orientation(ch);
+    if let Some(note) = note {
+        ctx.warnings
+            .push(format!("chassis {}: {note}", name_of(ch)));
+    }
+    // frame of the walls (the contents keep the current base frame)
+    let wall_pose = ctx.base.then(&Pose { r, t: o });
     if top {
-        let (a, b) = ctx
-            .f
-            .bx(o, [o[0] + size[0], o[1] + size[1], o[2] + size[2]]);
+        let (lo, hi) = wall_pose.bx([0.0; 3], size);
+        let (a, b) = ctx.f.bx(lo, hi);
         ctx.case.domain.min = a;
         ctx.case.domain.max = b;
     }
-    // walls: (side, axis in Celsius, at max?)
-    for (side, axis, max) in [
-        ("Left_Side", 0usize, false),
-        ("Right_Side", 0, true),
-        ("Bottom", 1, false),
-        ("Top", 1, true),
-        ("Front", 2, false),
-        ("Rear", 2, true),
-    ] {
+    // walls with their vents and fans
+    let wall_t = |side: &str| -> f64 {
+        at(ch, &format!("{side}/Chassis_Side"))
+            .filter(|s| installed(s))
+            .map(|s| mm(s, "Construction/Thickness").unwrap_or(1.0).max(0.01))
+            .unwrap_or(0.0)
+    };
+    let (tl, tr, tb, tt) = (
+        wall_t("Left_Side"),
+        wall_t("Right_Side"),
+        wall_t("Bottom"),
+        wall_t("Top"),
+    );
+    for (side, axis, max) in rack::SIDES {
         let Some(s) = at(ch, &format!("{side}/Chassis_Side")) else {
             continue;
         };
@@ -1792,29 +1980,31 @@ fn chassis(ctx: &mut Ctx, ch: &XNode, cad: &Cad, top: bool) {
             continue;
         }
         let t = mm(s, "Construction/Thickness").unwrap_or(1.0).max(0.01);
-        let mut lo = o;
-        let mut hi = [o[0] + size[0], o[1] + size[1], o[2] + size[2]];
-        if max {
-            lo[axis] = hi[axis] - t;
-        } else {
-            hi[axis] = lo[axis] + t;
+        let mut lo = [0.0; 3];
+        let mut hi = size;
+        if axis != 1 {
+            lo[1] = tb;
+            hi[1] = size[1] - tt;
+        }
+        if axis == 2 {
+            lo[0] = tl;
+            hi[0] = size[0] - tr;
         }
         let mat = ctx.mat(txt(s, "Construction/MaterialLink"), "al-6061-t6");
         ctx.count("Chassis_Side");
-        ctx.block(
+        let feats = rack::Features::of(s);
+        rack::wall_in(
+            ctx,
             &format!("{}/{}", name_of(ch), side.to_ascii_lowercase()),
+            &wall_pose,
+            size,
+            (lo, hi),
+            (axis, max),
+            t,
             mat,
-            lo,
-            hi,
-            0.0,
+            &feats,
         );
-        for feat in [
-            "Fans",
-            "Vents",
-            "Vent_Openings",
-            "Heatsinks",
-            "Cable_Sockets",
-        ] {
+        for feat in ["Vents", "Heatsinks", "Cable_Sockets"] {
             if let Some(l) = s.child(feat) {
                 for _ in l.children.iter().filter(|c| !c.children.is_empty()) {
                     ctx.skip(&format!("chassis-side {feat}"));
@@ -1845,12 +2035,36 @@ fn chassis(ctx: &mut Ctx, ch: &XNode, cad: &Cad, top: bool) {
             chassis(ctx, c, cad, false);
         }
     }
+    if let Some(l) = ch.child("Power_Supplies") {
+        for c in l.children("Power_Supply") {
+            rack::power_supply(ctx, c);
+        }
+    }
+    if let Some(l) = ch.child("Drive_Bays") {
+        for c in l.children("Drive_Bay") {
+            rack::drive_bay(ctx, c);
+        }
+    }
+    if let Some(l) = ch.child("Card_Bays") {
+        for c in l.children("Card_Bay") {
+            rack::card_bay(ctx, c);
+        }
+    }
+    if let Some(l) = ch.child("Chassis_Bays") {
+        for c in l.children("Chassis_Bay") {
+            rack::chassis_bay(ctx, c, cad);
+        }
+    }
     let mapped = [
         "PCBs",
         "Components",
         "Heatsinks",
         "Obstructions",
         "Subchassis",
+        "Power_Supplies",
+        "Drive_Bays",
+        "Card_Bays",
+        "Chassis_Bays",
     ];
     for list in [
         "Subassemblies",
@@ -1933,6 +2147,7 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
     case.meta.description = format!("Imported from a {app} {version} model");
     let mut ctx = Ctx {
         f: Frame { depth },
+        base: Pose::ID,
         mats: HashMap::new(),
         eps: HashMap::new(),
         case,
@@ -1942,6 +2157,8 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
         skipped: BTreeMap::new(),
         uninstalled: 0,
         names: HashMap::new(),
+        prefix: String::new(),
+        openings: vec![],
     };
     materials(project, &mut ctx);
 
@@ -2069,6 +2286,12 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
             flow_m3_s: None,
             loss: None,
         });
+    }
+    for mut b in std::mem::take(&mut ctx.openings) {
+        b.t_ambient_c = Some(amb);
+        if flow_on {
+            ctx.case.boundaries.push(b);
+        }
     }
     if open && !flow_on {
         ctx.warnings.push(
@@ -2350,6 +2573,248 @@ mod tests {
         let text = c.to_toml().unwrap();
         let back = Case::from_toml(&text).unwrap();
         assert_eq!(back.materials.len(), c.materials.len());
+    }
+
+    /// Rack objects, with the conventions checked on the STEP export of the
+    /// Celsius "Full Enclosure" tutorial: walls (Front at +Z), a perforated
+    /// vent and a fan with its curve in cfm, a chassis bay whose slot holds
+    /// a server rotated by 90°, a chip socket with a centred chip, its heat
+    /// sink with a cutout and a TIM, a DIMM socket, a drive bay, a power
+    /// supply.
+    #[test]
+    fn rack_objects() {
+        let side = |t: f64, extra: &str| {
+            format!("<Chassis_Side><Installed>Yes</Installed><Construction><Thickness>{t} mm</Thickness><MaterialLink>10-1</MaterialLink></Construction>{extra}</Chassis_Side>")
+        };
+        let vent = "<Vent_Openings><Vent_Opening><Installed>Yes</Installed><Identification><Name>Grille</Name></Identification>\
+            <Geometry><Geometry_Definition>Rectangular</Geometry_Definition><Width>50 mm</Width><Length>40 mm</Length></Geometry>\
+            <Placement><Offset_1>10 mm</Offset_1><Offset_2>20 mm</Offset_2></Placement>\
+            <Construction><Specification>Perforated</Specification><Perforation_Details><Hole_Size>3 mm</Hole_Size><Open_Area>50 %</Open_Area></Perforation_Details></Construction>\
+            </Vent_Opening></Vent_Openings>";
+        let fan = "<Fans><Fan><Installed>Yes</Installed><Identification><Reference_Designator>F1</Reference_Designator></Identification>\
+            <Geometry visibility=\"Locked\"><Overall_Size>40 mm</Overall_Size><Fan_Diameter>40 mm</Fan_Diameter><Hub_Diameter>20 mm</Hub_Diameter><Thickness>10 mm</Thickness></Geometry>\
+            <Placement><Mount_Location>Inside</Mount_Location><Offset_1>100 mm</Offset_1><Offset_2>50 mm</Offset_2></Placement>\
+            <Status><Fan_Status>On</Fan_Status></Status>\
+            <Cooling><Flow_Direction>Out</Flow_Direction><Flow_Rate_Option>Curve</Flow_Rate_Option><Fan_Curve>0,100, 20,0 &lt;cfm,Pa&gt;</Fan_Curve>\
+            <Rated_Speed>1000 rpm</Rated_Speed><Operating_Speed>Fixed</Operating_Speed><Fixed_Speed>1000 rpm</Fixed_Speed>\
+            <Heat_Dissipation><Heat_Specification>Fixed Heat Dissipation</Heat_Specification><Heat_Dissipated>2 W</Heat_Dissipated></Heat_Dissipation></Cooling>\
+            </Fan></Fans>";
+        let component = "<Component><Installed>Yes</Installed><Identification><Reference_Designator>U1</Reference_Designator></Identification>\
+            <Geometry><Shape>Rectangle</Shape><Height>1 mm</Height><Width>10 mm</Width><Depth>10 mm</Depth></Geometry>\
+            <Placement><Origin_Point>Low Centre</Origin_Point><Board_Side>Top</Board_Side><X_Location>0 mm</X_Location><Y_Location>0 mm</Y_Location><Z_Location>0 mm</Z_Location></Placement>\
+            <Construction><Modelling_Level>Simplified</Modelling_Level><MaterialLink>13-1</MaterialLink></Construction>\
+            <Power><Thermal_Design_Power>5 W</Thermal_Design_Power></Power>\
+            <TIMs><TIM><Installed>Yes</Installed><Identification><Reference_Designator>TIM1</Reference_Designator></Identification><Construction><Solid-Solid_Resistance>0.1 C/W</Solid-Solid_Resistance><Model_Thickness>No</Model_Thickness></Construction></TIM></TIMs>\
+            <HeatsinkLink><Heatsink><Installed>Yes</Installed><Identification><Reference_Designator>HS1</Reference_Designator></Identification>\
+            <Geometry><Type>Extruded</Type><Base_Width>20 mm</Base_Width><Base_Depth>20 mm</Base_Depth><Base_Thickness>2 mm</Base_Thickness><Fin_Thickness>1 mm</Fin_Thickness><Fin_Height>5 mm</Fin_Height><Number_of_Fins>4</Number_of_Fins><Fin_Depth>12 mm</Fin_Depth></Geometry>\
+            <Placement><Origin_Point>Centre</Origin_Point><Board_Side>Top</Board_Side><X_Offset>0 mm</X_Offset><Y_Offset>0 mm</Y_Offset><Z_Offset>0 mm</Z_Offset></Placement>\
+            <Construction><MaterialLink>10-1</MaterialLink></Construction>\
+            <Cutouts><Heatsink_Cutout><Installed>Yes</Installed><Geometry><Shape>Rectangle</Shape><Width>20 mm</Width><Depth>2 mm</Depth><Cutout_Heatsink_Base>No</Cutout_Heatsink_Base></Geometry><Placement><X_Offset>0 mm</X_Offset><Z_Offset>9 mm</Z_Offset></Placement></Heatsink_Cutout></Cutouts>\
+            </Heatsink></HeatsinkLink></Component>";
+        let pcb = |rd: &str, w: f64, d: f64, at: &str, power: f64, body: &str| {
+            format!("<PCB><Installed>Yes</Installed><Identification><Reference_Designator>{rd}</Reference_Designator></Identification>\
+                <Geometry><Shape>Rectangle</Shape><Thickness>1.6 mm</Thickness><Width>{w} mm</Width><Depth>{d} mm</Depth></Geometry>\
+                <Placement><Origin_Point>Low Corner</Origin_Point><Board_Side>Top</Board_Side>{at}</Placement>\
+                <Construction><Conductor_Material>11-1</Conductor_Material><Dielectric_Material>12-1</Dielectric_Material><Modelling_Level>Simplified Average</Modelling_Level><Number_Of_Conductor_Layers>2</Number_Of_Conductor_Layers></Construction>\
+                <Power><Top_Distributed_Power>{power} W</Top_Distributed_Power><Bottom_Distributed_Power>0 W</Bottom_Distributed_Power></Power>{body}</PCB>")
+        };
+        let dimm = pcb(
+            "DIMM1",
+            40.0,
+            15.0,
+            "<Centre_Offset>0 mm</Centre_Offset>",
+            1.0,
+            "",
+        );
+        let board = pcb(
+            "MB",
+            50.0,
+            150.0,
+            "<X_Location>2 mm</X_Location><Y_Location>5 mm</Y_Location><Z_Location>10 mm</Z_Location>",
+            0.0,
+            &format!(
+                "<Chip_Sockets><Chip_Socket><Installed>Yes</Installed><Identification><Reference_Designator>J1</Reference_Designator></Identification>\
+                 <Geometry><Height>2 mm</Height><Width>20 mm</Width><Depth>20 mm</Depth></Geometry>\
+                 <Placement><Board_Side>Top</Board_Side><X_Location>10 mm</X_Location><Z_Location>50 mm</Z_Location><Orientation>0 degrees</Orientation></Placement>\
+                 <Construction><MaterialLink>13-1</MaterialLink></Construction><ComponentLink>{component}</ComponentLink></Chip_Socket></Chip_Sockets>\
+                 <Daughter_Board_Sockets><Daughter_Board_Socket><Installed>Yes</Installed><Identification><Reference_Designator>J2</Reference_Designator></Identification>\
+                 <Geometry><Height>5 mm</Height><Width>5 mm</Width><Length>40 mm</Length><Angle>0 degrees</Angle></Geometry>\
+                 <Placement><Board_Side>Top</Board_Side><X_Location>40 mm</X_Location><Z_Location>20 mm</Z_Location><Orientation>0 degrees</Orientation></Placement>\
+                 <Construction><MaterialLink>13-1</MaterialLink></Construction><Daughter_Board>{dimm}</Daughter_Board></Daughter_Board_Socket></Daughter_Board_Sockets>"
+            ),
+        );
+        let server = format!(
+            "<Chassis><Installed>Yes</Installed><Identification><Reference_Designator>SRV</Reference_Designator></Identification>\
+             <Geometry><Height>50 mm</Height><Width>60 mm</Width><Depth>200 mm</Depth></Geometry>\
+             <Placement><X_Location>0 mm</X_Location><Y_Location>0 mm</Y_Location><Z_Location>0 mm</Z_Location></Placement>\
+             <Left_Side>{}</Left_Side><PCBs>{board}</PCBs>\
+             <Drive_Bays><Drive_Bay><Installed>Yes</Installed><Identification><Reference_Designator>DB1</Reference_Designator></Identification>\
+             <Geometry><Height>15 mm</Height><Width>30 mm</Width><Depth>40 mm</Depth></Geometry>\
+             <Placement><X_Location>5 mm</X_Location><Y_Location>20 mm</Y_Location><Z_Location>150 mm</Z_Location></Placement>\
+             <DriveLink><Drive><Installed>Yes</Installed><Identification><Reference_Designator>D1</Reference_Designator></Identification>\
+             <Geometry><Height>10 mm</Height><Width>20 mm</Width><Depth>30 mm</Depth></Geometry>\
+             <Mount_Location><Depth_Offset>0 mm</Depth_Offset><Sideways_Mounting_Position>Centre</Sideways_Mounting_Position><Vertical_Mounting_Position>Centre</Vertical_Mounting_Position></Mount_Location>\
+             <Construction><Mounting_Rails>Yes</Mounting_Rails><Mounting_Rail_Height>6 mm</Mounting_Rail_Height><Drive_Material>10-1</Drive_Material></Construction>\
+             <Power><Thermal_Design_Power>6 W</Thermal_Design_Power></Power></Drive></DriveLink></Drive_Bay></Drive_Bays></Chassis>",
+            side(1.0, "")
+        );
+        let bay_side = "<Chassis_Bay_Side><Installed>Yes</Installed><Construction><Thickness>1 mm</Thickness><MaterialLink>10-1</MaterialLink></Construction></Chassis_Bay_Side>";
+        let bay = format!(
+            "<Chassis_Bays><Chassis_Bay><Installed>Yes</Installed><Identification><Reference_Designator>Zone</Reference_Designator></Identification>\
+             <Geometry><Height>60 mm</Height><Width>100 mm</Width><Depth>200 mm</Depth></Geometry>\
+             <Placement><X_Location>10 mm</X_Location><Y_Location>10 mm</Y_Location><Z_Location>100 mm</Z_Location></Placement>\
+             <Construction><Slot_Definition><Slot_Size>50 mm</Slot_Size><First_Slot_Offset>0 mm</First_Slot_Offset><Slot_Direction>Left to Right</Slot_Direction><SlotsLink>\
+             <Chassis_Slot><Construction><Chassis_Alignment>Rear</Chassis_Alignment><Orientation_Angle>90</Orientation_Angle></Construction><Index>2</Index><ChassisLink>{server}</ChassisLink></Chassis_Slot>\
+             </SlotsLink></Slot_Definition></Construction>\
+             <Left_Side>{bay_side}</Left_Side><Right_Side>{bay_side}</Right_Side><Top>{bay_side}</Top><Bottom>{bay_side}</Bottom></Chassis_Bay></Chassis_Bays>"
+        );
+        let psu = "<Power_Supplies><Power_Supply><Installed>Yes</Installed><Identification><Reference_Designator>PS1</Reference_Designator></Identification>\
+            <Geometry><Height>30 mm</Height><Width>60 mm</Width><Depth>100 mm</Depth></Geometry>\
+            <Placement><X_Location>120 mm</X_Location><Y_Location>10 mm</Y_Location><Z_Location>150 mm</Z_Location></Placement>\
+            <Construction><Internal_Blockage_Percentage>40 %</Internal_Blockage_Percentage><Thickness>1 mm</Thickness><MaterialLink>10-1</MaterialLink></Construction>\
+            <Power><Calculated_Power>20 W</Calculated_Power></Power>\
+            <Vent_Openings><Vent_Opening><Installed>Yes</Installed><Identification><Name>Exhaust</Name></Identification>\
+            <Geometry><Geometry_Definition>Rectangular</Geometry_Definition><Width>30 mm</Width><Length>10 mm</Length></Geometry>\
+            <Placement><Side_Of_Supply>Rear</Side_Of_Supply><Offset_1>5 mm</Offset_1><Offset_2>5 mm</Offset_2></Placement>\
+            <Construction><Specification>Perforated</Specification><Perforation_Details><Hole_Size>2 mm</Hole_Size><Open_Area>60 %</Open_Area></Perforation_Details></Construction></Vent_Opening></Vent_Openings>\
+            <Fans><Fan><Installed>Yes</Installed><Identification><Reference_Designator>FP</Reference_Designator></Identification>\
+            <Geometry><Overall_Size>20 mm</Overall_Size><Fan_Diameter>20 mm</Fan_Diameter><Thickness>5 mm</Thickness></Geometry>\
+            <Placement><Side>Front</Side><Offset_1>30 mm</Offset_1><Offset_2>15 mm</Offset_2></Placement>\
+            <Cooling><Flow_Direction>In</Flow_Direction><Flow_Rate_Option>Fixed Flow</Flow_Rate_Option><Fan_Flow_Rate>0.002 m^3/s</Fan_Flow_Rate></Cooling></Fan></Fans>\
+            </Power_Supply></Power_Supplies>";
+        let start = MODEL.find("<Geometry><Height>50 mm</Height><Width>200 mm</Width><Depth>150 mm</Depth></Geometry>").unwrap();
+        let end = MODEL.find("</Chassis></ChassisLink>").unwrap();
+        let rack = format!(
+            "<Geometry><Height>100 mm</Height><Width>200 mm</Width><Depth>300 mm</Depth></Geometry>\
+             <Placement><X_Location>0 mm</X_Location><Y_Location>0 mm</Y_Location><Z_Location>0 mm</Z_Location></Placement>\
+             <Front>{}</Front><Rear>{}</Rear><Bottom>{}</Bottom>{bay}{psu}",
+            side(1.0, vent),
+            side(1.0, fan),
+            side(1.0, "")
+        );
+        let model = format!("{}{}{}", &MODEL[..start], rack, &MODEL[end..]);
+        let m = read(&container(&model)).unwrap();
+        let c = &m.case;
+        eprintln!("{:?}", m.warnings);
+        let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-6);
+        let blk = |n: &str| {
+            c.blocks.iter().find(|b| b.name == n).unwrap_or_else(|| {
+                panic!(
+                    "{n} missing: {:?}",
+                    c.blocks.iter().map(|b| &b.name).collect::<Vec<_>>()
+                )
+            })
+        };
+        let boxed = |n: &str, lo: [f64; 3], hi: [f64; 3]| {
+            let b = blk(n);
+            assert!(
+                close(b.min, lo) && close(b.max, hi),
+                "{n}: {:?} {:?}",
+                b.min,
+                b.max
+            );
+            b
+        };
+        // FerroTherm x = X, y = 300 − Z, z = Y; Front (Z 299…300) at y 0…1
+        let front = boxed("Box/front", [0.0, 0.0, 1.0], [200.0, 1.0, 100.0]);
+        assert_eq!(front.outline.as_ref().unwrap().len(), 2, "vent hole");
+        boxed("Box/rear", [0.0, 299.0, 1.0], [200.0, 300.0, 100.0]);
+        // vent: opening on the front face with the perforated-plate loss
+        let v = c
+            .boundaries
+            .iter()
+            .find(|b| b.name == "Box/front/Grille")
+            .unwrap();
+        assert_eq!(v.face, Face::Ymin);
+        let r = v.region.as_ref().unwrap();
+        assert_eq!((r.min, r.max), ([10.0, 20.0], [60.0, 60.0]));
+        let l = v.loss.as_ref().unwrap();
+        assert!((l.zeta - (0.707 * 0.5f64.sqrt() + 0.5).powi(2) / 0.25).abs() < 1e-9);
+        // fan: centre plane at the inner face of the housing, blowing out
+        let f = c.fans.iter().find(|f| f.name == "Box/rear/F1").unwrap();
+        assert!(close(f.center, [100.0, 290.0, 50.0]), "{:?}", f.center);
+        assert_eq!(f.direction, "+y");
+        assert!(
+            (f.curve[1][0] - 20.0 * 4.719_474_432e-4).abs() < 1e-12,
+            "cfm"
+        );
+        let hub = blk("Box/rear/F1/hub");
+        assert_eq!(hub.power_w, 2.0);
+        assert!((hub.min[1] - 290.0).abs() < 1e-9 && (hub.max[1] - 299.0).abs() < 1e-9);
+        assert!(c
+            .boundaries
+            .iter()
+            .any(|b| b.name == "Box/rear/F1/opening" && b.face == Face::Ymax));
+        // server in slot 2 of the bay (X 60…110), rotated +90° about Z:
+        // local x → +Y, local y → −X: Celsius X = 110 − y, Y = 10 + x, Z = 100 + z
+        boxed(
+            "Zone/S2/SRV/left_side",
+            [60.0, 0.0, 10.0],
+            [110.0, 200.0, 11.0],
+        );
+        boxed("Zone/S2/MB", [103.4, 40.0, 12.0], [105.0, 190.0, 62.0]);
+        boxed("Zone/S2/J1", [101.4, 120.0, 22.0], [103.4, 140.0, 42.0]);
+        // chip centred on its socket, 5 W
+        let u1 = boxed("Zone/S2/U1", [100.4, 125.0, 27.0], [101.4, 135.0, 37.0]);
+        assert_eq!(u1.power_w, 5.0);
+        // heat sink centred on the chip, fins over the whole base depth
+        // (not Fin_Depth) split by the cutout at 9…11 mm
+        boxed(
+            "Zone/S2/HS1/base",
+            [98.4, 120.0, 22.0],
+            [100.4, 140.0, 42.0],
+        );
+        boxed(
+            "Zone/S2/HS1/fin1.1",
+            [93.4, 131.0, 22.0],
+            [98.4, 140.0, 23.0],
+        );
+        boxed(
+            "Zone/S2/HS1/fin1.2",
+            [93.4, 120.0, 22.0],
+            [98.4, 129.0, 23.0],
+        );
+        assert!(m
+            .warnings
+            .iter()
+            .any(|w| w.contains("TIM1") && w.contains("0.50 K")));
+        // DIMM standing on the board along the socket length, centred on its width
+        boxed("Zone/S2/J2", [98.4, 130.0, 52.0], [103.4, 170.0, 57.0]);
+        let d = boxed(
+            "Zone/S2/J2/DIMM1",
+            [88.4, 130.0, 53.7],
+            [103.4, 170.0, 55.3],
+        );
+        assert_eq!(d.pcb.as_ref().unwrap().normal, "z");
+        assert_eq!(d.power_w, 1.0);
+        // drive centred in its bay, rails filling the sides
+        let dr = boxed("Zone/S2/DB1/D1", [77.5, 20.0, 20.0], [87.5, 50.0, 40.0]);
+        assert_eq!(dr.power_w, 6.0);
+        boxed(
+            "Zone/S2/DB1/D1/rail1",
+            [79.5, 20.0, 15.0],
+            [85.5, 50.0, 20.0],
+        );
+        // power supply: rear vent → planar resistance, front fan blowing in
+        let ex = c
+            .resistances
+            .iter()
+            .find(|r| r.name == "PS1/rear/Exhaust")
+            .unwrap();
+        assert!(close(ex.center, [140.0, 150.0, 20.0]), "{:?}", ex.center);
+        assert_eq!((ex.axis.as_str(), ex.size), ("y", [30.0, 10.0]));
+        let fp = c.fans.iter().find(|f| f.name == "PS1/front/FP").unwrap();
+        assert!(close(fp.center, [150.0, 55.0, 25.0]), "{:?}", fp.center);
+        assert_eq!((fp.direction.as_str(), fp.flow_m3_s), ("+y", Some(0.002)));
+        let plates: f64 = c
+            .blocks
+            .iter()
+            .filter(|b| b.name.starts_with("PS1/internals"))
+            .map(|b| b.power_w)
+            .sum();
+        assert!((plates - 20.0).abs() < 1e-9);
+        // the whole case reads back
+        Case::from_toml(&c.to_toml().unwrap()).unwrap();
     }
 
     /// U1 turned into a "Detailed" package with a substrate and a 1.5 W die.

@@ -224,6 +224,20 @@ pub struct Loss {
 }
 
 impl Loss {
+    /// Thin perforated plate (or grille) of open-area ratio `f` with holes of
+    /// `hole_mm`: ζ = (0.707 √(1 − f) + 1 − f)² / f² on the approach velocity
+    /// (Idelchik, Handbook of Hydraulic Resistance, thin sharp-edged
+    /// perforated plate at high Reynolds number), plus the laminar term.
+    pub fn thin_plate(f: f64, hole_mm: Option<f64>) -> Loss {
+        let f = f.clamp(1e-3, 1.0);
+        let zeta = (0.707 * (1.0 - f).sqrt() + 1.0 - f).powi(2) / (f * f);
+        Loss {
+            zeta,
+            free_area: Some(f),
+            hole_diameter_mm: hole_mm.filter(|d| *d > 0.0),
+        }
+    }
+
     /// (linear coefficient Pa·s/m, quadratic coefficient Pa·s²/m²).
     pub fn coefficients(&self, rho: f64, mu: f64) -> (f64, f64) {
         let lin = match (self.free_area, self.hole_diameter_mm) {
@@ -430,6 +444,21 @@ pub struct GridSettings {
     /// Minimum number of cells across every interval between geometry planes.
     #[serde(default = "one")]
     pub min_cells_per_interval: usize,
+    /// Geometry planes closer than this are merged, mm (0 = off). Keeps
+    /// near-coincident faces (a 1 mm wall beside a 2 mm wall…) from adding
+    /// thin cells across the whole domain.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub merge_mm: f64,
+    /// Cells across the thickness of every PCB (default 4).
+    #[serde(default = "default_pcb_cells")]
+    pub pcb_cells: usize,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+fn default_pcb_cells() -> usize {
+    crate::model::PCB_MIN_CELLS
 }
 
 impl Default for GridSettings {
@@ -437,6 +466,8 @@ impl Default for GridSettings {
         GridSettings {
             max_cell_mm: default_max_cell(),
             min_cells_per_interval: 1,
+            merge_mm: 0.0,
+            pcb_cells: default_pcb_cells(),
         }
     }
 }

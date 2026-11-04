@@ -22,6 +22,21 @@ impl Grid {
         max_cell: [f64; 3],
         min_cells_per_interval: usize,
     ) -> Grid {
+        Grid::conforming_merged(lo, hi, planes, max_cell, min_cells_per_interval, 0.0)
+    }
+
+    /// As [`Grid::conforming`], with the geometry planes closer than `merge`
+    /// (m) merged into one (the first of a cluster is kept; the domain
+    /// bounds always stay). Objects are painted by cell centre, so a block
+    /// thinner than `merge` can end up a cell thinner or thicker.
+    pub fn conforming_merged(
+        lo: [f64; 3],
+        hi: [f64; 3],
+        planes: [Vec<f64>; 3],
+        max_cell: [f64; 3],
+        min_cells_per_interval: usize,
+        merge: f64,
+    ) -> Grid {
         let mut nodes: [Vec<f64>; 3] = Default::default();
         for a in 0..3 {
             let mut p: Vec<f64> = planes[a]
@@ -33,6 +48,24 @@ impl Grid {
             p.push(hi[a]);
             p.sort_by(|x, y| x.partial_cmp(y).unwrap());
             p.dedup_by(|x, y| (*x - *y).abs() < SNAP);
+            if merge > SNAP {
+                let last = *p.last().unwrap();
+                let mut kept: Vec<f64> = Vec::with_capacity(p.len());
+                for v in p {
+                    match kept.last() {
+                        Some(k) if v - k < merge => {}
+                        _ => kept.push(v),
+                    }
+                }
+                // the upper domain bound replaces a kept plane too close to it
+                if *kept.last().unwrap() != last {
+                    if last - kept.last().unwrap() < merge && kept.len() > 1 {
+                        kept.pop();
+                    }
+                    kept.push(last);
+                }
+                p = kept;
+            }
             let mut out = vec![p[0]];
             for w in p.windows(2) {
                 let len = w[1] - w[0];
@@ -146,6 +179,22 @@ mod tests {
                 assert!(w[1] > w[0]);
             }
         }
+        let total: f64 = (0..g.ncells()).map(|c| g.volume(c)).sum();
+        assert!((total - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn merged_planes() {
+        // 0.30 and 0.302 merge (gap < 0.01); 0.995 merges into the bound 1.0
+        let g = Grid::conforming_merged(
+            [0.0; 3],
+            [1.0, 1.0, 1.0],
+            [vec![0.30, 0.302, 0.6, 0.995], vec![], vec![]],
+            [1.0; 3],
+            1,
+            0.01,
+        );
+        assert_eq!(g.nodes[0], vec![0.0, 0.30, 0.6, 1.0]);
         let total: f64 = (0..g.ncells()).map(|c| g.volume(c)).sum();
         assert!((total - 1.0).abs() < 1e-12);
     }

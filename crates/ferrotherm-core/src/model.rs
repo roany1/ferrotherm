@@ -297,7 +297,7 @@ impl Model {
             }
             // Boards are thin and strongly orthotropic: resolve the thickness.
             let refine = match &b.pcb {
-                Some(stack) => Some((stack.normal_axis()?, PCB_MIN_CELLS)),
+                Some(stack) => Some((stack.normal_axis()?, case.grid.pcb_cells.max(1))),
                 None => None,
             };
             let outline = match &b.outline {
@@ -493,7 +493,14 @@ impl Model {
         if maxc.iter().any(|v| !(*v > 0.0)) {
             return Err(Error::Invalid("grid.max_cell_mm must be > 0".into()));
         }
-        let grid = Grid::conforming(lo, hi, planes, maxc, case.grid.min_cells_per_interval);
+        let grid = Grid::conforming_merged(
+            lo,
+            hi,
+            planes,
+            maxc,
+            case.grid.min_cells_per_interval,
+            case.grid.merge_mm.max(0.0) * MM,
+        );
         let ncells = grid.ncells();
         if ncells > 50_000_000 {
             return Err(Error::Invalid(format!(
