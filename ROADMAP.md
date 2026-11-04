@@ -66,6 +66,10 @@ Done and validated (see README → Verification):
 - Grid report: aspect ratios, cells across gaps, warnings for gaps closed by
   the grid.
 - Validation: same results as a uniform fine grid at a fraction of the cells.
+- Reference case: the Celsius "Full Enclosure" rack tutorial, where the
+  uniform conforming grid leaves one cell per fin gap and the chips come out
+  about 20 K above Celsius (README → Verification). Done when its chips are
+  within a few kelvin of Celsius.
 
 ## Phase 4 — Interoperability
 

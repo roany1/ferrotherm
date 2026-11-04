@@ -139,6 +139,7 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | k–ε, heated block in a duct (3D, conjugate) | Energy balance | imbalance < 0.01 % |
 | L-shaped board with a hole (polygon outline) | Exact area, power, export/re-import (STL, IDF with cut-out) | area 5900 mm² exact on a matching grid, all power in the board |
 | Celsius "Full Enclosure" rack tutorial (2024.36): 16 blade servers in 4 chassis bays, card bay, power supply, 16 fans, 36 vents | STEP export of the same model made by Celsius | every solid part (16 chips, 16 sockets, 880 heat-sink pieces, 132 sockets, 149 boards, 96 drive pieces, walls), the 16 fans and the 36 vents within 2 µm |
+| Same rack solved (1319 W, k–ε, 2.4 M cells with planes closer than 0.9 mm merged, 440 iterations, **not converged**: energy residual 3.6e-3, chip temperatures moving ±0.13 K) | Chip temperatures computed by Celsius EC Solver (4.5 M cells; read from its plot, ±0.5 K) | **open discrepancy:** the 16 chips U1 at 62.6 … 67.3 °C (block mean) against 43.8 … 45.3 °C, i.e. +18 … +23 K. Energy balance closes (1265 W through the openings). The heat sinks have one cell per 1.9 mm fin gap and fin faces merged with nearby planes: fin-to-air ΔT 27 K at 1.1 m/s in the gaps, about twice what a resolved laminar channel gives. A grid with ≥ 3 cells per gap needs local refinement (roadmap phase 3) to fit in memory |
 | Celsius "Detailed" package (synthetic) | Hand-placed die and substrate | die and substrate at their place in either frame; fallback to one block when the parts fit no frame |
 | Defeaturing: plate with through, blind and counterbored holes, a boss, fillets; chassis shell with 12 vents, 4 screw holes and filleted edges; chamfered cover; two-instance assembly | Exact volumes | plain plate 24 000 mm³, shell 48 992 mm³, cover 15 000 mm³ (all exact); instance names and placements kept |
 | FerroTherm STEP/IDF/STL export | Re-import (OpenCascade for STEP) | boxes recovered within 1e-4 mm |
@@ -160,6 +161,11 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
   reach a steady residual; the solver then stops at `max_iterations` and
   reports *NOT converged* — look at the Convergence tab and the monitor
   points, or run transient.
+- **Heat sinks need cells in the fin gaps.** The grid is a single
+  conforming Cartesian grid (no local refinement yet): with one cell per
+  gap between fins the fin heat transfer is underpredicted (rack tutorial:
+  chips about 20 K hotter than Celsius). Use at least 3 cells per gap; on
+  large models this is not affordable until phase 3 of the roadmap.
 - **Geometry is axis-aligned boxes** (staircase). STEP bodies are imported
   as bounding boxes or voxels; inclined or curved surfaces are approximated.
   Polygon outlines (boards, blocks) are resolved at the cell centres.
