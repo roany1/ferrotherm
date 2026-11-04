@@ -452,6 +452,7 @@ pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
                 emissivity: None,
                 finish: Some("pcb-soldermask".into()),
                 outline_axis: tile_outline.as_ref().map(|_| "z".to_string()),
+                min_cells: None,
                 outline: tile_outline,
             });
         }
@@ -518,6 +519,7 @@ pub fn to_fragment(board: &mut Board, opt: &ToCaseOptions) -> Fragment {
                     finish: None,
                     outline: None,
                     outline_axis: None,
+                    min_cells: None,
                 });
             }
         }

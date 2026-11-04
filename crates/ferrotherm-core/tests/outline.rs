@@ -96,3 +96,45 @@ fn even_odd_rings() {
     assert!(!point_in_rings(&rings, 5.0, 5.0));
     assert!(!point_in_rings(&rings, 11.0, 5.0));
 }
+
+/// `min_cells` puts at least that many cells across the block, whatever
+/// `max_cell_mm` says (the die of a package on a coarse board grid).
+#[test]
+fn min_cells_refines_small_blocks() {
+    let toml = |mc: &str| {
+        format!(
+            r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [60, 60, 10]
+        material = "air-still"
+        [grid]
+        max_cell_mm = 5.0
+        [[blocks]]
+        name = "die"
+        material = "si"
+        min = [28, 28, 4]
+        max = [31, 31, 5]
+        power_w = 1.0
+        {mc}
+        [[boundaries]]
+        face = "zmin"
+        type = "fixed"
+        t_c = 25
+    "#
+        )
+    };
+    let count = |s: &Simulation, a: usize| {
+        let g = &s.model.grid;
+        (0..g.n()[a])
+            .filter(|&i| g.center(a, i) > 28e-3 && g.center(a, i) < 31e-3)
+            .count()
+    };
+    let coarse = sim(&toml(""));
+    assert_eq!(count(&coarse, 0), 1);
+    let fine = sim(&toml("min_cells = [5, 4, 0]"));
+    assert_eq!(count(&fine, 0), 5);
+    assert_eq!(count(&fine, 1), 4);
+    let back = Case::from_toml(&fine.case.to_toml().unwrap()).unwrap();
+    assert_eq!(back.blocks[0].min_cells, Some([5, 4, 0]));
+}

@@ -344,6 +344,50 @@ impl Ctx {
     fn block(&mut self, name: &str, mat: String, lo: V3, hi: V3, power: f64) {
         self.block_in(&Pose::ID, name, mat, lo, hi, power);
     }
+    /// Celsius minimum cell counts (local width x, depth z) of the last
+    /// block if it is `name`, mapped to the FerroTherm axes.
+    fn min_cells_last(&mut self, pose: &Pose, name_prefix: &str, cells: Option<(usize, usize)>) {
+        let Some((cw, cd)) = cells else { return };
+        let Some(b) = self.case.blocks.last_mut() else {
+            return;
+        };
+        // the block was not pushed (degenerate) when the last one is another
+        let own = b.name == name_prefix
+            || b.name
+                .strip_prefix(name_prefix)
+                .is_some_and(|r| r.starts_with('~'));
+        if !own {
+            return;
+        }
+        let mut m = [0usize; 3];
+        for (local, n) in [(0usize, cw), (2usize, cd)] {
+            let (ca, s) = pose.axis(local);
+            m[ft_axis(ca, s).0] = n;
+        }
+        b.min_cells = Some(m);
+    }
+    /// Board block given in the local frame of `pose`.
+    fn block_pcb_in(&mut self, pose: &Pose, name: &str, st: PcbStack, lo: V3, hi: V3, power: f64) {
+        let (lo, hi) = pose.bx(lo, hi);
+        let (a, b) = self.f.bx(lo, hi);
+        if (0..3).any(|k| b[k] - a[k] <= 1e-9) {
+            return;
+        }
+        let name = self.unique(name);
+        self.case.blocks.push(Block {
+            name,
+            material: None,
+            pcb: Some(st),
+            min: a,
+            max: b,
+            power_w: power,
+            emissivity: None,
+            finish: None,
+            outline: None,
+            outline_axis: None,
+            min_cells: None,
+        });
+    }
     /// Block given in the local frame of `pose`.
     fn block_in(&mut self, pose: &Pose, name: &str, mat: String, lo: V3, hi: V3, power: f64) {
         let (lo, hi) = pose.bx(lo, hi);
@@ -364,6 +408,7 @@ impl Ctx {
             finish: None,
             outline: None,
             outline_axis: None,
+            min_cells: None,
         });
     }
 }
@@ -760,22 +805,31 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
     // separate blocks, so the die temperature is resolved.
     if level.eq_ignore_ascii_case("Detailed") {
         let parts: Vec<&XNode> = inner.iter().copied().filter(|o| installed(o)).collect();
-        if !parts.is_empty() {
-            match detailed_parts(ctx, &parts, lo, hi, &pose, ang, bottom) {
+        let mut subs = Vec::new();
+        n.descendants("Substrate", &mut subs);
+        let subs: Vec<&XNode> = subs
+            .into_iter()
+            .filter(|s| installed(s) && at(s, "Geometry").is_some())
+            .collect();
+        if !parts.is_empty() || !subs.is_empty() {
+            match detailed_parts(ctx, &parts, &subs, lo, hi, &pose, ang, bottom, normal) {
                 Ok((list, convention)) => {
                     let mat = ctx.mat(txt(n, "Construction/MaterialLink"), "mold-compound");
                     ctx.block_in(&pose, &name, mat, lo, hi, power);
+                    ctx.min_cells_last(&pose, &name, min_cells_of(n));
                     let np = list.len();
                     for p in list {
                         let pose_p = if p.chassis { Pose::ID } else { pose };
-                        ctx.block_in(
-                            &pose_p,
-                            &format!("{name}/{}", p.name),
-                            p.mat,
-                            p.lo,
-                            p.hi,
-                            p.power,
-                        );
+                        let pname = format!("{name}/{}", p.name);
+                        match p.fill {
+                            PartFill::Mat(m) => {
+                                ctx.block_in(&pose_p, &pname, m, p.lo, p.hi, p.power)
+                            }
+                            PartFill::Pcb(st) => {
+                                ctx.block_pcb_in(&pose_p, &pname, st, p.lo, p.hi, p.power)
+                            }
+                        }
+                        ctx.min_cells_last(&pose_p, &pname, p.cells);
                     }
                     ctx.warnings.push(format!(
                         "component {name}: detailed package resolved into its body and {np} internal part(s), {inner_power} W in the parts (placement: {convention})"
@@ -836,60 +890,100 @@ fn component(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
         }
         let mat = ctx.mat(txt(n, "Construction/MaterialLink"), "mold-compound");
         ctx.block_in(&pose, &name, mat, lo, hi, power);
+        ctx.min_cells_last(&pose, &name, min_cells_of(n));
     }
+}
+
+/// Celsius "Minimum Number Of Cells" (width, depth) of an object, if any
+/// is above 1.
+fn min_cells_of(n: &XNode) -> Option<(usize, usize)> {
+    let g = at(n, "Geometry/Grid/Minimum_Number_Of_Cells")?;
+    let w = txt(g, "Width_Direction")
+        .and_then(val)
+        .unwrap_or(0.0)
+        .max(0.0) as usize;
+    let d = txt(g, "Depth_Direction")
+        .and_then(val)
+        .unwrap_or(0.0)
+        .max(0.0) as usize;
+    (w > 1 || d > 1).then_some((w.min(64), d.min(64)))
+}
+
+/// Type, material, height and level (µm) shared by an array of parts.
+type ArrayKey = (String, String, i64, i64);
+
+enum PartFill {
+    Mat(String),
+    Pcb(PcbStack),
 }
 
 struct InnerPart {
     name: String,
-    mat: String,
+    fill: PartFill,
     lo: V3,
     hi: V3,
     power: f64,
     /// Box in the chassis frame (else in the board frame of the package).
     chassis: bool,
+    cells: Option<(usize, usize)>,
 }
 
-/// Internal parts of a "Detailed" package as boxes. Celsius does not state
-/// the frame of their locations in the file, so three readings are tried
-/// and the first that puts every part inside the package body is used:
-/// relative to the package low corner (height from the board face), in the
-/// board frame, in the chassis frame. Fails on CAD parts, tilted parts, a
-/// rotated footprint, or when no reading fits.
+/// Paint order of a part type: later parts own the cells they share with
+/// earlier ones (the die wins over wire bonds and encapsulant).
+fn part_rank(typ: &str) -> u8 {
+    let t = typ.to_ascii_lowercase();
+    if t.contains("encapsulant") || t.contains("mold") || t.contains("lid") {
+        0
+    } else if t == "die attach" || t.contains("attach") {
+        2
+    } else if t == "die" {
+        3
+    } else {
+        1
+    }
+}
+
+/// Internal parts of a "Detailed" package as boxes.
+///
+/// * Cuboids and cylinders (`Diameter`; the Width/Depth of a cylinder are
+///   unused defaults) keep their own material and power.
+/// * The package `Substrate` becomes a board stack-up block.
+/// * Arrays of small identical parts (solder balls, bumps, pads: 8 or more
+///   of one type and height) become one equivalent layer: through the layer
+///   k = f·k_s + (1 − f)·k_air, across it the Maxwell–Garnett value for
+///   parallel cylinders, f = solder area fraction of the array footprint.
+///
+/// Celsius does not state the frame of the part locations; three readings
+/// are tried and the first that puts every part inside the package body is
+/// used: package low corner (height from the board face), board frame,
+/// chassis frame. On the real 2024.36 models it is the package corner.
+#[allow(clippy::too_many_arguments)]
 fn detailed_parts(
-    ctx: &Ctx,
+    ctx: &mut Ctx,
     parts: &[&XNode],
+    subs: &[&XNode],
     lo: V3,
     hi: V3,
     pose: &Pose,
     ang: f64,
     bottom: bool,
+    normal: usize,
 ) -> Result<(Vec<InnerPart>, &'static str), String> {
     if ang.abs() > 1e-9 {
         return Err("rotated footprint".into());
     }
     struct Raw {
         name: String,
-        mat: String,
+        typ: String,
+        fill: PartFill,
         p: V3,
         size: V3,
         power: f64,
+        /// Footprint area of one part (for arrays), mm².
+        area: f64,
+        cells: Option<(usize, usize)>,
     }
-    let mut raw = Vec::new();
-    for (i, o) in parts.iter().enumerate() {
-        let shape = txt(o, "Geometry/Shape").unwrap_or("Cuboid");
-        if shape.eq_ignore_ascii_case("Solid Definition") {
-            return Err("an internal part is a CAD solid".into());
-        }
-        let (r, _) = orientation(o);
-        if r != I3 {
-            return Err("an internal part is rotated".into());
-        }
-        let w = mm(o, "Geometry/Width").or_else(|| mm(o, "Geometry/Diameter"));
-        let h = mm(o, "Geometry/Height");
-        let d = mm(o, "Geometry/Depth").or_else(|| mm(o, "Geometry/Diameter"));
-        let (Some(w), Some(h), Some(d)) = (w, h, d) else {
-            return Err("an internal part has no size".into());
-        };
+    let place = |o: &XNode, w: f64, d: f64| -> V3 {
         let mut p = [
             mm(o, "Placement/X_Location").unwrap_or(0.0),
             mm(o, "Placement/Y_Location").unwrap_or(0.0),
@@ -899,39 +993,184 @@ fn detailed_parts(
             p[0] -= 0.5 * w;
             p[2] -= 0.5 * d;
         }
+        p
+    };
+    let mut raw = Vec::new();
+    for (i, o) in parts.iter().enumerate() {
+        let shape = txt(o, "Geometry/Shape").unwrap_or("Cuboid");
+        let (r, _) = orientation(o);
+        if r != I3 {
+            return Err("an internal part is rotated".into());
+        }
+        let h = mm(o, "Geometry/Height").ok_or("an internal part has no height")?;
+        let (w, d, area) = if shape.eq_ignore_ascii_case("Cylinder") {
+            let dia = mm(o, "Geometry/Diameter").ok_or("a cylinder part has no diameter")?;
+            (dia, dia, std::f64::consts::PI * 0.25 * dia * dia)
+        } else if shape.eq_ignore_ascii_case("Cuboid") {
+            let w = mm(o, "Geometry/Width").ok_or("an internal part has no width")?;
+            let d = mm(o, "Geometry/Depth").ok_or("an internal part has no depth")?;
+            (w, d, w * d)
+        } else {
+            return Err(format!("an internal part has shape '{shape}'"));
+        };
         let mut nm = name_of(o);
         if nm.is_empty() || nm == "?" {
             nm = format!("part{}", i + 1);
         }
         raw.push(Raw {
             name: nm,
-            mat: ctx.mat(
+            typ: txt(o, "Identification/Type").unwrap_or("").to_string(),
+            fill: PartFill::Mat(ctx.mat(
                 txt(o, "Cooling/MaterialLink").or_else(|| txt(o, "Construction/MaterialLink")),
                 "mold-compound",
-            ),
-            p,
+            )),
+            p: place(o, w, d),
             size: [w, h, d],
             power: txt(o, "Cooling/Heat_Dissipated")
                 .and_then(power_w)
                 .unwrap_or(0.0)
                 * txt(o, "Cooling/Utilisation").and_then(pct).unwrap_or(1.0),
+            area,
+            cells: min_cells_of(o),
         });
     }
+    // arrays of small identical parts → one equivalent layer each
+    let key = |r: &Raw| {
+        let m = match &r.fill {
+            PartFill::Mat(m) => m.clone(),
+            PartFill::Pcb(_) => String::new(),
+        };
+        (
+            r.typ.clone(),
+            m,
+            (r.size[1] * 1e6).round() as i64,
+            (r.p[1] * 1e6).round() as i64,
+        )
+    };
+    let mut counts: HashMap<ArrayKey, usize> = HashMap::new();
+    for r in &raw {
+        *counts.entry(key(r)).or_default() += 1;
+    }
+    let mut merged: Vec<Raw> = Vec::new();
+    let mut arrays: Vec<(ArrayKey, Vec<Raw>)> = Vec::new();
+    for r in raw {
+        let k = key(&r);
+        if counts[&k] >= 8 {
+            match arrays.iter_mut().find(|(a, _)| *a == k) {
+                Some((_, v)) => v.push(r),
+                None => arrays.push((k, vec![r])),
+            }
+        } else {
+            merged.push(r);
+        }
+    }
+    let k_air = ctx
+        .case
+        .materials
+        .iter()
+        .find(|m| m.id == ctx.case.domain.material)
+        .map(|m| m.k.as_vec()[0])
+        .unwrap_or(0.026);
+    for ((typ, mat, _, _), v) in arrays {
+        let mut a = [f64::INFINITY; 3];
+        let mut b = [f64::NEG_INFINITY; 3];
+        for r in &v {
+            for q in 0..3 {
+                a[q] = a[q].min(r.p[q]);
+                b[q] = b[q].max(r.p[q] + r.size[q]);
+            }
+        }
+        let foot = (b[0] - a[0]) * (b[2] - a[2]);
+        let f = (v.iter().map(|r| r.area).sum::<f64>() / foot).clamp(0.0, 1.0);
+        let base = ctx.case.materials.iter().find(|m| m.id == mat).cloned();
+        let (ks, rho, cp) = match &base {
+            Some(m) => (m.k.as_vec()[0], m.density, m.cp),
+            None => (50.0, 8500.0, 180.0), // tin–lead/SAC solder, typical
+        };
+        let kn = f * ks + (1.0 - f) * k_air;
+        let kt = k_air * ((ks + k_air) + f * (ks - k_air)) / ((ks + k_air) - f * (ks - k_air));
+        let mut kv = [kt; 3];
+        kv[normal] = kn;
+        let label = if typ.is_empty() {
+            "array"
+        } else {
+            typ.as_str()
+        };
+        let id = format!("ecs-{}-layer-{}", slug(label), ctx.case.materials.len() + 1);
+        ctx.case.materials.push(Material {
+            id: id.clone(),
+            name: format!("{} layer ({} parts, {:.0} % solid)", label, v.len(), f * 100.0),
+            category: "imported".into(),
+            k: Conductivity::Orthotropic(kv),
+            density: f * rho + (1.0 - f) * 1.2,
+            cp,
+            viscosity: None,
+            beta: None,
+            k_table: None,
+            specs: vec![],
+            source: "Equivalent layer of a Celsius package part array (FerroTherm)".into(),
+            notes: format!(
+                "through the layer f·k_s + (1−f)·k_air, across it Maxwell–Garnett; f = {f:.3}, k_s = {ks}"
+            ),
+        });
+        merged.push(Raw {
+            name: format!("{} ×{}", label, v.len()),
+            typ,
+            fill: PartFill::Mat(id),
+            p: a,
+            size: [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+            power: v.iter().map(|r| r.power).sum(),
+            area: foot,
+            // an array is not resolved part by part
+            cells: None,
+        });
+    }
+    for (i, sb) in subs.iter().enumerate() {
+        let t = mm(sb, "Geometry/Thickness").ok_or("the substrate has no thickness")?;
+        let w = mm(sb, "Geometry/Width").ok_or("the substrate has no width")?;
+        let d = mm(sb, "Geometry/Depth").ok_or("the substrate has no depth")?;
+        let (r, _) = orientation(sb);
+        if r != I3 {
+            return Err("the substrate is rotated".into());
+        }
+        let stack = stack_of(ctx, at(sb, "Construction"), t, normal);
+        let mut nm = name_of(sb);
+        if nm.is_empty() || nm == "?" {
+            nm = format!("substrate{}", i + 1);
+        }
+        merged.push(Raw {
+            name: nm,
+            typ: "Substrate".into(),
+            fill: PartFill::Pcb(stack),
+            p: place(sb, w, d),
+            size: [w, t, d],
+            power: 0.0,
+            area: w * d,
+            cells: None,
+        });
+    }
+    merged.sort_by_key(|r| part_rank(&r.typ));
     let tol = 1e-3;
     let inside = |a: V3, b: V3, blo: V3, bhi: V3| {
         (0..3).all(|k| a[k] >= blo[k] - tol && b[k] <= bhi[k] + tol && b[k] - a[k] > 1e-9)
     };
+    let fill_of = |r: &Raw| match &r.fill {
+        PartFill::Mat(m) => PartFill::Mat(m.clone()),
+        PartFill::Pcb(s) => PartFill::Pcb(s.clone()),
+    };
     let build = |f: &dyn Fn(&Raw) -> (V3, V3), chassis: bool| -> Vec<InnerPart> {
-        raw.iter()
+        merged
+            .iter()
             .map(|r| {
                 let (a, b) = f(r);
                 InnerPart {
                     name: r.name.clone(),
-                    mat: r.mat.clone(),
+                    fill: fill_of(r),
                     lo: a,
                     hi: b,
                     power: r.power,
                     chassis,
+                    cells: r.cells,
                 }
             })
             .collect()
@@ -1098,6 +1337,64 @@ fn gap_pad(ctx: &mut Ctx, n: &XNode, board: Option<&BoardRef>) {
     );
 }
 
+/// Board stack-up from a Celsius `Construction` node (PCBs and package
+/// substrates).
+fn stack_of(ctx: &Ctx, c: Option<&XNode>, t: f64, normal: usize) -> PcbStack {
+    let level = c
+        .and_then(|c| txt(c, "Modelling_Level"))
+        .unwrap_or("Simplified Average");
+    let copper = ctx.mat(c.and_then(|c| txt(c, "Conductor_Material")), "cu-c11000");
+    let dielectric = ctx.mat(c.and_then(|c| txt(c, "Dielectric_Material")), "fr4");
+    let mut stack = PcbStack {
+        thickness_mm: t,
+        dielectric,
+        copper,
+        copper_layers: vec![],
+        layers: None,
+        copper_oz: None,
+        coverage: None,
+        via_fraction: 0.0,
+        normal: AXIS_NAME[normal].into(),
+    };
+    let per_layer: Vec<CopperLayer> = c
+        .and_then(|c| at(c, "Conductor_Layers"))
+        .map(|ls| {
+            ls.children("Conductor_Layer")
+                .filter(|l| installed(l))
+                .filter_map(|l| {
+                    Some(CopperLayer {
+                        oz: mm(l, "Construction/Conductor_Thickness")? / OZ_MM,
+                        coverage: txt(l, "Construction/Conductor_Planar_Percentage")
+                            .and_then(pct)
+                            .unwrap_or(0.5),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let n_layers = c
+        .and_then(|c| txt(c, "Number_Of_Conductor_Layers"))
+        .and_then(val)
+        .map(|v| v as usize);
+    let simplified = level.to_ascii_lowercase().contains("simplified") || per_layer.is_empty();
+    if simplified {
+        stack.layers = Some(n_layers.unwrap_or(per_layer.len().max(2)).max(1));
+        stack.copper_oz = Some(
+            c.and_then(|c| mm(c, "Conductor_Thickness"))
+                .unwrap_or(OZ_MM)
+                / OZ_MM,
+        );
+        stack.coverage = Some(
+            c.and_then(|c| txt(c, "Conductor_Planar_Percentage"))
+                .and_then(pct)
+                .unwrap_or(0.5),
+        );
+    } else {
+        stack.copper_layers = per_layer;
+    }
+    stack
+}
+
 fn pcb(ctx: &mut Ctx, n: &XNode) {
     ctx.count("PCB");
     if !installed(n) {
@@ -1153,59 +1450,7 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
     };
     let (nax, _) = pose.axis(1);
     let normal = ft_axis(nax, 1.0).0;
-    let c = at(n, "Construction");
-    let level = c
-        .and_then(|c| txt(c, "Modelling_Level"))
-        .unwrap_or("Simplified Average");
-    let copper = ctx.mat(c.and_then(|c| txt(c, "Conductor_Material")), "cu-c11000");
-    let dielectric = ctx.mat(c.and_then(|c| txt(c, "Dielectric_Material")), "fr4");
-    let mut stack = PcbStack {
-        thickness_mm: t,
-        dielectric,
-        copper,
-        copper_layers: vec![],
-        layers: None,
-        copper_oz: None,
-        coverage: None,
-        via_fraction: 0.0,
-        normal: AXIS_NAME[normal].into(),
-    };
-    let per_layer: Vec<CopperLayer> = c
-        .and_then(|c| at(c, "Conductor_Layers"))
-        .map(|ls| {
-            ls.children("Conductor_Layer")
-                .filter(|l| installed(l))
-                .filter_map(|l| {
-                    Some(CopperLayer {
-                        oz: mm(l, "Construction/Conductor_Thickness")? / OZ_MM,
-                        coverage: txt(l, "Construction/Conductor_Planar_Percentage")
-                            .and_then(pct)
-                            .unwrap_or(0.5),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let n_layers = c
-        .and_then(|c| txt(c, "Number_Of_Conductor_Layers"))
-        .and_then(val)
-        .map(|v| v as usize);
-    let simplified = level.to_ascii_lowercase().contains("simplified") || per_layer.is_empty();
-    if simplified {
-        stack.layers = Some(n_layers.unwrap_or(per_layer.len().max(2)).max(1));
-        stack.copper_oz = Some(
-            c.and_then(|c| mm(c, "Conductor_Thickness"))
-                .unwrap_or(OZ_MM)
-                / OZ_MM,
-        );
-        stack.coverage = Some(
-            c.and_then(|c| txt(c, "Conductor_Planar_Percentage"))
-                .and_then(pct)
-                .unwrap_or(0.5),
-        );
-    } else {
-        stack.copper_layers = per_layer;
-    }
+    let stack = stack_of(ctx, at(n, "Construction"), t, normal);
     let power = txt(n, "Power/Top_Distributed_Power")
         .and_then(power_w)
         .unwrap_or(0.0)
@@ -1241,6 +1486,7 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
         finish: None,
         outline,
         outline_axis,
+        min_cells: None,
     });
     let board = BoardRef { pose, t };
     for (list, item) in [
@@ -1260,9 +1506,12 @@ fn pcb(ctx: &mut Ctx, n: &XNode) {
     }
     for other in ["TIMs", "Holes", "Batteries", "Chip_Sockets"] {
         if let Some(l) = at(n, other) {
-            let k = l.children.iter().filter(|c| !c.children.is_empty()).count();
-            for _ in 0..k {
-                ctx.skip(&format!("PCB {other}"));
+            for c in l.children.iter().filter(|c| !c.children.is_empty()) {
+                if installed(c) {
+                    ctx.skip(&format!("PCB {other}"));
+                } else {
+                    ctx.uninstalled += 1;
+                }
             }
         }
     }
@@ -1736,7 +1985,8 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
                     t if t.contains("epsilon")
                         || t.contains("k-e")
                         || t.contains("k_e")
-                        || t == "ke" =>
+                        || t == "ke"
+                        || t.ends_with(" ke") =>
                     {
                         fs.turbulence = Turbulence::KEpsilon
                     }
@@ -1925,6 +2175,7 @@ impl CelsiusModel {
                     finish: None,
                     outline: None,
                     outline_axis: None,
+                    min_cells: None,
                 });
             }
         }
@@ -2202,6 +2453,132 @@ mod tests {
         );
         assert!(die.t_max_c > body.t_avg_c);
         assert!(out.report.energy_imbalance_pct.abs() < 0.01);
+    }
+
+    /// U1 as the FPBGA of the reference model (Celsius 2024.36): parts in a
+    /// subcomponent group, a 2-layer substrate, cylindrical solder balls
+    /// whose Width/Depth are unused 500 mm defaults (the size is the
+    /// Diameter), wire bonds overlapping the die.
+    #[test]
+    fn detailed_package_real_structure() {
+        let obs = |name: &str, typ: &str, shape: &str, size: &str, at: &str, extra: &str| {
+            format!(
+                "<Solid_Obstruction><Installed>Yes</Installed><Identification><Name>{name}</Name><Type>{typ}</Type></Identification>\
+                 <Geometry><Shape>{shape}</Shape>{size}</Geometry>\
+                 <Placement><Origin_Point>Low Corner</Origin_Point>{at}</Placement>{extra}</Solid_Obstruction>"
+            )
+        };
+        let loc = |x: f64, y: f64, z: f64| {
+            format!("<X_Location>{x} mm</X_Location><Y_Location>{y} mm</Y_Location><Z_Location>{z} mm</Z_Location>")
+        };
+        let cub = |w: f64, h: f64, d: f64| {
+            format!("<Height>{h} mm</Height><Width>{w} mm</Width><Depth>{d} mm</Depth>")
+        };
+        let mut o = String::new();
+        o += &obs(
+            "Encapsulant",
+            "Encapsulant",
+            "Cuboid",
+            &cub(10.0, 1.0, 6.0),
+            &loc(0.0, 1.0, 0.0),
+            "",
+        );
+        o += &obs(
+            "Die Attach",
+            "Die Attach",
+            "Cuboid",
+            &cub(2.0, 0.04, 2.0),
+            &loc(4.0, 1.0, 2.0),
+            "",
+        );
+        let die_size = cub(2.0, 0.3, 2.0)
+            + "<Grid><Minimum_Number_Of_Cells><Width_Direction>5</Width_Direction><Depth_Direction>4</Depth_Direction></Minimum_Number_Of_Cells></Grid>";
+        o += &obs("Die", "Die", "Cuboid", &die_size, &loc(4.0, 1.04, 2.0),
+            "<Cooling><Heat_Dissipated>1 W</Heat_Dissipated><MaterialLink>13-1</MaterialLink></Cooling>");
+        o += &obs(
+            "Wire Bonds",
+            "Other",
+            "Cuboid",
+            &cub(4.0, 0.065, 4.0),
+            &loc(3.0, 1.0, 1.0),
+            "",
+        );
+        for i in 0..3 {
+            for j in 0..3 {
+                o += &obs(
+                    &format!("Ball {i},{j}"),
+                    "Solder Pad",
+                    "Cylinder",
+                    "<Height>0.5 mm</Height><Width>500 mm</Width><Depth>500 mm</Depth><Diameter>0.4 mm</Diameter>",
+                    &loc(1.0 + 3.0 * i as f64, 0.0, 1.0 + 2.0 * j as f64),
+                    "",
+                );
+            }
+        }
+        let sub = format!(
+            "<Substrate><Installed>Yes</Installed><Identification><Reference_Designator>Substrate2</Reference_Designator></Identification>\
+             <Geometry><Shape>Rectangle</Shape><Thickness>0.5 mm</Thickness><Width>10 mm</Width><Depth>6 mm</Depth></Geometry>\
+             <Placement><Origin_Point>Low Corner</Origin_Point>{}</Placement>\
+             <Construction><Conductor_Material>11-1</Conductor_Material><Dielectric_Material>12-1</Dielectric_Material>\
+             <Modelling_Level>Explicit Layers</Modelling_Level><Number_Of_Conductor_Layers>2</Number_Of_Conductor_Layers>\
+             <Conductor_Layers><Conductor_Layer><Installed>Yes</Installed><Construction><Conductor_Thickness>0.035 mm</Conductor_Thickness><Conductor_Planar_Percentage>25 %</Conductor_Planar_Percentage></Construction></Conductor_Layer>\
+             <Conductor_Layer><Installed>Yes</Installed><Construction><Conductor_Thickness>0.035 mm</Conductor_Thickness><Conductor_Planar_Percentage>25 %</Conductor_Planar_Percentage></Construction></Conductor_Layer></Conductor_Layers>\
+             </Construction></Substrate>",
+            loc(0.0, 0.5, 0.0)
+        );
+        let model = MODEL.replace(
+            "<Construction><Modelling_Level>2R</Modelling_Level><Junction-to-Case_Thermal_Resistance>5 K/W</Junction-to-Case_Thermal_Resistance><Junction-to-Board_Thermal_Resistance>10 C/W</Junction-to-Board_Thermal_Resistance></Construction>",
+            &format!(
+                "<Construction><Modelling_Level>Detailed</Modelling_Level></Construction>\
+                 <SubcomponentGroups><Subcomponent_Group><Installed>Yes</Installed><Obstructions>{o}{sub}</Obstructions></Subcomponent_Group></SubcomponentGroups>"
+            ),
+        );
+        let m = read(&container(&model)).unwrap();
+        let c = &m.case;
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("resolved") && w.contains("package corner")),
+            "{:?}",
+            m.warnings
+        );
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let pos = |n: &str| {
+            c.blocks
+                .iter()
+                .position(|b| b.name == n)
+                .unwrap_or_else(|| panic!("{n}"))
+        };
+        let blk = |n: &str| &c.blocks[pos(n)];
+        // board top at z 21.6; balls 0..0.5, substrate 0.5..1.0, die 1.04..1.34
+        let balls = blk("U1/Solder Pad ×9");
+        assert!(close(balls.min[2], 21.6) && close(balls.max[2], 22.1));
+        // array footprint: x 1 .. 7.4, depth 1 .. 5.4 (balls of Ø 0.4)
+        assert!(close(balls.max[0] - balls.min[0], 6.4) && close(balls.max[1] - balls.min[1], 4.4));
+        let mat = c
+            .materials
+            .iter()
+            .find(|x| Some(&x.id) == balls.material.as_ref())
+            .unwrap();
+        let f = 9.0 * std::f64::consts::PI * 0.04 / (6.4 * 4.4);
+        let k = mat.k.as_vec();
+        assert!(k[2] > 10.0 * k[0], "{k:?}");
+        assert!(mat.notes.contains(&format!("{f:.3}")), "{}", mat.notes);
+        let sub = blk("U1/Substrate2");
+        assert!(close(sub.min[2], 22.1) && close(sub.max[2], 22.6));
+        let st = sub.pcb.as_ref().unwrap();
+        assert_eq!(st.normal, "z");
+        assert_eq!(st.copper_layers.len(), 2);
+        let die = blk("U1/Die");
+        assert!(close(die.min[2], 22.64) && close(die.max[2], 22.94));
+        assert_eq!(die.power_w, 1.0);
+        // Celsius minimum cells: width → x, depth → FerroTherm y (board normal z)
+        assert_eq!(die.min_cells, Some([5, 4, 0]));
+        assert_eq!(blk("U1/Solder Pad ×9").min_cells, None);
+        // paint order: encapsulant first, die after wire bonds and die attach
+        assert!(pos("U1/Encapsulant") < pos("U1/Wire Bonds"));
+        assert!(pos("U1/Wire Bonds") < pos("U1/Die Attach"));
+        assert!(pos("U1/Die Attach") < pos("U1/Die"));
     }
 
     /// Internal parts that fit no frame: one block with the total power.

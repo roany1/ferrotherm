@@ -911,6 +911,7 @@ impl FerroApp {
             finish: None,
             outline: None,
             outline_axis: None,
+            min_cells: None,
         });
         self.hidden.push(false);
         self.sel = Sel::Block(self.case.blocks.len() - 1);

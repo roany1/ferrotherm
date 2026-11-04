@@ -366,12 +366,20 @@ gruppi. Gli oggetti segnati "non installati" in Celsius vengono saltati.
 - I componenti "Detailed" (package con die, substrato, sfere…) vengono
   importati come corpo del package più le sue parti interne, ognuna con il
   suo materiale e la sua potenza: la temperatura del die è risolta e compare
-  nella tabella dei blocchi (`U1/die`). Il file Celsius non dice in quale
-  sistema di riferimento sono scritte le posizioni delle parti interne:
-  l'import prova angolo del package, scheda e chassis, usa il primo in cui
-  tutte le parti stanno dentro il corpo e lo scrive negli avvisi. Se nessuno
-  va bene, o se il package è ruotato sulla scheda o contiene solidi CAD,
-  torna al blocco unico con la potenza totale.
+  nella tabella dei blocchi (`U6/Die`). Il substrato diventa una scheda
+  multistrato con i suoi strati di rame; le schiere di sfere di saldatura
+  (centinaia di cilindri da pochi decimi di mm, impossibili da meshare una
+  per una) diventano uno strato equivalente con la conducibilità giusta
+  attraverso lo spessore (frazione di lega) e nel piano. Sui modelli reali
+  2024.36 le posizioni delle parti sono riferite all'angolo del package;
+  l'import prova comunque anche scheda e chassis e scrive negli avvisi
+  quale ha usato. Se il package è ruotato sulla scheda o contiene solidi
+  CAD, torna al blocco unico con la potenza totale.
+- Il **numero minimo di celle** di Celsius (5 × 5 di default su ogni
+  oggetto) viene importato come `min_cells` sul blocco. È importante: con
+  celle da 3,5 mm un die da 3 mm è una cella sola e la sua temperatura
+  esce circa 10 K più alta. Fa crescere la griglia (su test_paper2 da
+  0,65 a 1,3 milioni di celle).
 - Le schede poligonali mantengono il loro contorno (`Outline`): appartengono
   alla scheda solo le celle con il centro dentro il poligono.
 - Gli oggetti non ancora supportati (ventole, vent, cold plate, sensori…)

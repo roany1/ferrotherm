@@ -258,6 +258,7 @@ impl Model {
             refine: Option<(usize, usize)>,
             /// Outline rings (m) in the plane normal to the axis.
             outline: Option<(usize, Vec<Vec<[f64; 2]>>)>,
+            min_cells: [usize; 3],
         }
         let blocks_all = all_blocks(case)?;
         let mut block_boxes = Vec::new();
@@ -321,6 +322,7 @@ impl Model {
                 mat: mi,
                 refine,
                 outline,
+                min_cells: b.min_cells.unwrap_or([0; 3]),
             });
         }
 
@@ -416,6 +418,12 @@ impl Model {
                 planes[a].push(b.hi[a]);
             }
             if let Some((a, nmin)) = b.refine {
+                for q in 1..nmin {
+                    planes[a].push(b.lo[a] + (b.hi[a] - b.lo[a]) * q as f64 / nmin as f64);
+                }
+            }
+            for a in 0..3 {
+                let nmin = b.min_cells[a].min(64);
                 for q in 1..nmin {
                     planes[a].push(b.lo[a] + (b.hi[a] - b.lo[a]) * q as f64 / nmin as f64);
                 }

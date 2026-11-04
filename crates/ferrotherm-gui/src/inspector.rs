@@ -518,6 +518,24 @@ pub fn block(ui: &mut Ui, b: &mut Block, lib: &Library, idx: usize) {
         num_min(ui, &mut b.power_w, 0.01, 0.0, " W")
             .on_hover_text("Uniform heat load of the whole block");
         ui.end_row();
+        ui.label("Min. cells").on_hover_text(
+            "Minimum number of grid cells across the block along x, y, z (0 = none): \
+             small powered parts such as a die need several to resolve the heat spreading",
+        );
+        ui.horizontal(|ui| {
+            let mut m = b.min_cells.unwrap_or([0; 3]);
+            let mut changed = false;
+            for (k, v) in m.iter_mut().enumerate() {
+                ui.label(RichText::new(["x", "y", "z"][k]).weak());
+                changed |= ui
+                    .add(egui::DragValue::new(v).range(0..=64).speed(0.1))
+                    .changed();
+            }
+            if changed {
+                b.min_cells = (m != [0; 3]).then_some(m);
+            }
+        });
+        ui.end_row();
         if let Some(rings) = &b.outline {
             ui.label("Outline");
             let pts: usize = rings.iter().map(|r| r.len()).sum();

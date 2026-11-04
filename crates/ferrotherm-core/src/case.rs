@@ -350,6 +350,7 @@ impl HeatSink {
             finish: None,
             outline: None,
             outline_axis: None,
+            min_cells: None,
         });
         let pitch = if self.fin_count > 1 {
             (width - self.fin_thickness) / (self.fin_count - 1) as f64
@@ -380,6 +381,7 @@ impl HeatSink {
                 finish: None,
                 outline: None,
                 outline_axis: None,
+                min_cells: None,
             });
         }
         Ok(out)
@@ -513,6 +515,11 @@ pub struct Block {
     /// else the thinnest side of the box).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline_axis: Option<String>,
+    /// Minimum number of grid cells across the block along x, y, z (0 = no
+    /// minimum), as Celsius' "Minimum Number of Cells": small powered parts
+    /// such as a die need several cells to resolve the heat spreading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_cells: Option<[usize; 3]>,
 }
 
 impl Block {
