@@ -36,17 +36,19 @@ Done and validated (see README → Verification):
 
 ## Phase 1 — Celsius import, last gaps
 
-- Verify on real models (needs files from users):
-  - multi-axis rotations of boards/obstructions (STEP export of a model that
-    uses them);
+- Reference models are the demo and tutorial projects shipped with Celsius
+  EC Solver (known to solve well in Celsius), each with its Celsius STEP
+  export and Celsius temperatures. Verify on them:
+  - multi-axis rotations of boards/obstructions;
   - the frame of the internal-part locations of "Detailed" packages (today
     three frames are tried and the import reports which one fitted);
-  - numerical comparison of a second model against Celsius temperatures.
+  - numerical comparison against Celsius temperatures (first one: the
+    "Full Enclosure" rack tutorial).
 - Import cold plates, sensors, fans and vents not mounted on a wall, card
   bays with slots side by side, thermal interface materials (contact
   resistances: needs a contact-resistance model in the core).
-- Done when: every object of the two reference models is imported, the
-  comparison table covers both, no "not supported" warnings remain on them.
+- Done when: every object of the Celsius demo models is imported, the
+  comparison table covers them, no "not supported" warnings remain on them.
 
 ## Phase 2 — Turbulence and wall treatment
 
