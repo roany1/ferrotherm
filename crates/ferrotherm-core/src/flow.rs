@@ -1460,7 +1460,7 @@ impl<'a> Solver<'a> {
         }
         // wall cells: friction velocity of the blended wall law and ω
         let mut wall = vec![false; nc];
-        let mut wwall = vec![0.0; nc];
+        let mut wwall = vec![0.0f64; nc];
         let mut utau_w = vec![[0.0f64; 3]; nc];
         for c in 0..nc {
             if !self.fluid[c] {
