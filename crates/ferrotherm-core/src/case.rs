@@ -72,6 +72,13 @@ pub enum Turbulence {
     /// result; best accuracy with wall cells at y* ≈ 30…300.
     #[serde(alias = "k-epsilon", alias = "ke", alias = "k_e")]
     KEpsilon,
+    /// k–ω SST (Menter, Kuntz & Langtry 2003) with automatic wall
+    /// treatment: viscous sub-layer and log law blended for shear, ω and
+    /// heat transfer (Kader 1981), so wall cells can sit anywhere in y⁺.
+    /// For low-Reynolds and separated flows where k–ε with wall functions
+    /// underpredicts the heat transfer.
+    #[serde(alias = "k-omega-sst", alias = "sst", alias = "k_omega")]
+    KOmegaSst,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

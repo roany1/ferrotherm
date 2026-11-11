@@ -477,6 +477,10 @@ fn network_matches_2r() {
 /// the hydraulic diameter D_h = 2H (both plates heated).
 /// Returns (C_f, C_f Dean, Nu, Nu Gnielinski, max y* of the wall cells).
 fn ke_channel(cell_z_mm: f64) -> (f64, f64, f64, f64) {
+    turbulent_channel("k_epsilon", cell_z_mm)
+}
+
+fn turbulent_channel(model: &str, cell_z_mm: f64) -> (f64, f64, f64, f64) {
     let h = 0.02;
     let u = 10.0;
     let s = sim(&format!(
@@ -488,9 +492,9 @@ fn ke_channel(cell_z_mm: f64) -> (f64, f64, f64, f64) {
         [grid]
         max_cell_mm = [10.0, 1.0, {cell_z_mm}]
         [flow]
-        turbulence = "k_epsilon"
+        turbulence = "{model}"
         gravity = [0, 0, 0]
-        max_iterations = 1500
+        max_iterations = 3000
         tolerance = 1e-5
         relax_velocity = 0.6
         [[boundaries]]
@@ -559,7 +563,7 @@ fn ke_channel(cell_z_mm: f64) -> (f64, f64, f64, f64) {
     let nu_gn = (ff / 8.0) * (re - 1000.0) * pr
         / (1.0 + 12.7 * (ff / 8.0).sqrt() * (pr.powf(2.0 / 3.0) - 1.0));
     eprintln!(
-        "K-EPS CHANNEL dz {cell_z_mm} mm: it {} Cf {cf:.5} Dean {cf_dean:.5} ({:+.1} %), Nu {nu_num:.1} Gnielinski {nu_gn:.1} ({:+.1} %)",
+        "{model} CHANNEL dz {cell_z_mm} mm: it {} Cf {cf:.5} Dean {cf_dean:.5} ({:+.1} %), Nu {nu_num:.1} Gnielinski {nu_gn:.1} ({:+.1} %)",
         f.iterations,
         100.0 * (cf / cf_dean - 1.0),
         100.0 * (nu_num / nu_gn - 1.0)
@@ -757,4 +761,23 @@ fn one_cell_gap_conduction_exact() {
     let exact = 40.0 / rth;
     eprintln!("GAP CONDUCTION {q:.5} W exact {exact:.5} W");
     assert!((q / exact - 1.0).abs() < 0.01, "{q} vs {exact}");
+}
+
+/// k–ω SST on the turbulent channel of the k–ε test (Dean C_f, Gnielinski Nu).
+#[test]
+fn sst_channel_friction_and_heat() {
+    let (cf, cf_ref, nu, nu_ref) = turbulent_channel("k_omega_sst", 2.0);
+    assert!((cf / cf_ref - 1.0).abs() < 0.15, "Cf {cf} vs {cf_ref}");
+    assert!((nu / nu_ref - 1.0).abs() < 0.20, "Nu {nu} vs {nu_ref}");
+}
+
+/// Automatic wall treatment: the same channel with the wall cell in the
+/// buffer layer (0.25 mm, y⁺ ≈ 3) and in the log layer (4 mm, y⁺ ≈ 50).
+#[test]
+fn sst_channel_wall_insensitivity() {
+    let a = turbulent_channel("k_omega_sst", 0.25);
+    let b = turbulent_channel("k_omega_sst", 4.0);
+    assert!((a.0 / b.0 - 1.0).abs() < 0.10, "Cf {} vs {}", a.0, b.0);
+    assert!((a.2 / b.2 - 1.0).abs() < 0.10, "Nu {} vs {}", a.2, b.2);
+    assert!((a.0 / a.1 - 1.0).abs() < 0.15, "fine-grid Cf {} vs Dean {}", a.0, a.1);
 }
