@@ -5,7 +5,7 @@
 //! solutions and published benchmarks. Each test states its reference.
 
 use ferrotherm_core::simulate::SIGMA;
-use ferrotherm_core::{Case, Library, Simulation};
+use ferrotherm_core::{Case, Library, Report, Simulation};
 
 fn sim(toml: &str) -> Simulation {
     let case = Case::from_toml(toml).unwrap();
@@ -636,4 +636,125 @@ fn k_epsilon_energy_balance() {
     let tmax = out.report.blocks[0].t_max_c;
     let area = 2.0 * (0.03 * 0.01 + 0.02 * 0.01) + 0.03 * 0.02;
     assert!(tmax > 25.0 + dt_air && tmax < 25.0 + 20.0 / (10.0 * area));
+}
+
+/// Channel between two isothermal plates (gap g = 2 mm, 10 mm wide,
+/// 20 mm long), laminar air at 0.5 m/s (Re ≈ 125), plates at 50 °C, air in
+/// at 20 °C. Heat taken up by the air: Q = ṁc_p ΔT (1 − e^−NTU) with the
+/// mean Nusselt number of Stephan's correlation for simultaneously
+/// developing flow (Muzychka & Yovanovich 2004, eq. 16). With one cell
+/// across the gap the one-cell-channel model must give the result of the
+/// resolved grid.
+fn plate_channel(cells_across: usize, inlet: bool, t_lo: f64, t_hi: f64) -> Report {
+    let flow = if inlet {
+        r#"
+        [[boundaries]]
+        face = "ymin"
+        type = "inlet"
+        velocity_m_s = 0.5
+        t_ambient_c = 20
+        region = { min = [0, 1], max = [10, 3] }
+        [[boundaries]]
+        face = "ymax"
+        type = "opening"
+        t_ambient_c = 20
+        region = { min = [0, 1], max = [10, 3] }
+        "#
+    } else {
+        ""
+    };
+    let s = sim(&format!(
+        r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [10, 20, 4]
+        material = "air"
+        [grid]
+        max_cell_mm = [10, 1.0, {dz}]
+        [flow]
+        turbulence = "laminar"
+        gravity = [0, 0, 0]
+        max_iterations = 3000
+        tolerance = 1e-6
+        relax_velocity = 0.5
+        relax_pressure = 0.5
+        [[blocks]]
+        name = "lo"
+        material = "al-6061-t6"
+        min = [0, 0, 0]
+        max = [10, 20, 1]
+        [[blocks]]
+        name = "hi"
+        material = "al-6061-t6"
+        min = [0, 0, 3]
+        max = [10, 20, 4]
+        [[boundaries]]
+        face = "zmin"
+        type = "fixed"
+        t_c = {t_lo}
+        [[boundaries]]
+        face = "zmax"
+        type = "fixed"
+        t_c = {t_hi}
+        [[boundaries]]
+        face = "xmin"
+        type = "symmetry"
+        [[boundaries]]
+        face = "xmax"
+        type = "symmetry"
+        {flow}
+        "#,
+        dz = 2.0 / cells_across as f64
+    ));
+    let out = s.run(|_| {}).unwrap();
+    assert!(out.result.flow.as_ref().unwrap().converged);
+    out.report
+}
+
+#[test]
+fn one_cell_channel_forced_convection() {
+    let (g, w, l, u) = (0.002, 0.01, 0.02, 0.5);
+    let dh = 2.0 * g;
+    let alpha = AIR_K / (AIR_RHO * AIR_CP);
+    let pr = AIR_MU * AIR_CP / AIR_K;
+    let nu = ferrotherm_core::flow::nu_plates(0.0, l, dh, u * dh / alpha, pr);
+    let mcp = AIR_RHO * u * g * w * AIR_CP;
+    let ntu = nu * AIR_K / dh * 2.0 * w * l / mcp;
+    let exact = mcp * 30.0 * (1.0 - (-ntu).exp());
+    let q1 = plate_channel(1, true, 50.0, 50.0).advected_out_w;
+    let q8 = plate_channel(8, true, 50.0, 50.0).advected_out_w;
+    eprintln!(
+        "PLATE CHANNEL Nu_m {nu:.2}: 1 cell {q1:.4} W, 8 cells {q8:.4} W, Stephan {exact:.4} W"
+    );
+    assert!(
+        (q8 / exact - 1.0).abs() < 0.05,
+        "resolved grid {q8} vs {exact}"
+    );
+    assert!(
+        (q1 / q8 - 1.0).abs() < 0.05,
+        "one cell {q1} vs resolved {q8}"
+    );
+    // without the model one cell gives h = 2k/g instead of Nu k/D_h
+    let q_plain = mcp * 30.0 * (1.0 - (-(2.0 * AIR_K / g) * 2.0 * w * l / mcp).exp());
+    assert!(q1 > 1.15 * q_plain);
+}
+
+/// Still air in a gap one cell wide between a hot and a cold plate: the
+/// conduction across must stay exactly k A ΔT / g (the raised heat-transfer
+/// coefficient of the one-cell-channel model is only for heat given to a
+/// flow).
+#[test]
+fn one_cell_gap_conduction_exact() {
+    let r = plate_channel(1, false, 60.0, 20.0);
+    let q = r
+        .boundaries
+        .iter()
+        .find(|b| b.name.starts_with("zmax"))
+        .unwrap()
+        .heat_out_w;
+    let k_al = 167.0;
+    let rth = (0.002 / AIR_K + 2.0 * 0.001 / k_al) / (0.01 * 0.02);
+    let exact = 40.0 / rth;
+    eprintln!("GAP CONDUCTION {q:.5} W exact {exact:.5} W");
+    assert!((q / exact - 1.0).abs() < 0.01, "{q} vs {exact}");
 }

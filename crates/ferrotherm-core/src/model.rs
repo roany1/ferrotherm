@@ -412,6 +412,7 @@ impl Model {
 
         // ---- grid ------------------------------------------------------
         let mut planes: [Vec<f64>; 3] = Default::default();
+        let mut limits: [Vec<(f64, f64, f64)>; 3] = Default::default();
         for b in &block_boxes {
             for a in 0..3 {
                 planes[a].push(b.lo[a]);
@@ -424,8 +425,8 @@ impl Model {
             }
             for a in 0..3 {
                 let nmin = b.min_cells[a].min(64);
-                for q in 1..nmin {
-                    planes[a].push(b.lo[a] + (b.hi[a] - b.lo[a]) * q as f64 / nmin as f64);
+                if nmin > 1 && b.hi[a] > b.lo[a] {
+                    limits[a].push((b.lo[a], b.hi[a], (b.hi[a] - b.lo[a]) / nmin as f64));
                 }
             }
         }
@@ -493,13 +494,14 @@ impl Model {
         if maxc.iter().any(|v| !(*v > 0.0)) {
             return Err(Error::Invalid("grid.max_cell_mm must be > 0".into()));
         }
-        let grid = Grid::conforming_merged(
+        let grid = Grid::conforming_limited(
             lo,
             hi,
             planes,
             maxc,
             case.grid.min_cells_per_interval,
             case.grid.merge_mm.max(0.0) * MM,
+            limits,
         );
         let ncells = grid.ncells();
         if ncells > 50_000_000 {

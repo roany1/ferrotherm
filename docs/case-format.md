@@ -55,7 +55,7 @@ initial temperature.
 | `emissivity` or `finish` | Surface emissivity for internal radiation (`[radiation]`) |
 | `outline` | Optional polygon shape: list of closed rings `[[u, v], …]`, mm, absolute coordinates in the plane normal to `outline_axis` (axes x,y for normal z; x,z for y; y,z for x). Only the cells of the box whose centre is inside belong to the block; even–odd rule, so an inner ring is a hole/cut-out. Exported to STEP/STL as strip boxes and to IDF as board outline + cut-outs |
 | `outline_axis` | `x`, `y` or `z`; default the PCB normal, else the thinnest side of the box |
-| `min_cells` | Optional `[nx, ny, nz]`: at least that many grid cells across the block along each axis (0 = no minimum), whatever `max_cell_mm` says. As Celsius' "Minimum Number of Cells" (imported from it): a 3 mm die on a 3.5 mm board grid is one cell and its rise is overpredicted. The planes cross the whole domain, so the cell count grows |
+| `min_cells` | Optional `[nx, ny, nz]`: at least that many grid cells across the block along each axis (0 = no minimum), whatever `max_cell_mm` says: inside the block the cells are at most (size / n) wide; intervals already finer because of other geometry are not split again. As Celsius' "Minimum Number of Cells" (imported from it): a 3 mm die on a 3.5 mm board grid is one cell and its rise is overpredicted. The planes cross the whole domain, so the cell count grows |
 
 ```toml
 [[blocks]]

@@ -37,6 +37,31 @@ impl Grid {
         min_cells_per_interval: usize,
         merge: f64,
     ) -> Grid {
+        Grid::conforming_limited(
+            lo,
+            hi,
+            planes,
+            max_cell,
+            min_cells_per_interval,
+            merge,
+            Default::default(),
+        )
+    }
+
+    /// As [`Grid::conforming_merged`], with local cell-size limits per axis:
+    /// `(from, to, size)` (m) caps the cells whose centre lies in
+    /// [from, to]. A block that needs at least n cells gives the limit
+    /// (lo, hi, (hi − lo)/n): intervals already finer (from other geometry
+    /// planes) are not split again.
+    pub fn conforming_limited(
+        lo: [f64; 3],
+        hi: [f64; 3],
+        planes: [Vec<f64>; 3],
+        max_cell: [f64; 3],
+        min_cells_per_interval: usize,
+        merge: f64,
+        limits: [Vec<(f64, f64, f64)>; 3],
+    ) -> Grid {
         let mut nodes: [Vec<f64>; 3] = Default::default();
         for a in 0..3 {
             let mut p: Vec<f64> = planes[a]
@@ -69,7 +94,12 @@ impl Grid {
             let mut out = vec![p[0]];
             for w in p.windows(2) {
                 let len = w[1] - w[0];
-                let n = ((len / max_cell[a]).ceil() as usize).max(min_cells_per_interval.max(1));
+                let mid = 0.5 * (w[0] + w[1]);
+                let cap = limits[a]
+                    .iter()
+                    .filter(|(f, t, _)| mid >= *f && mid <= *t)
+                    .fold(max_cell[a], |m, &(_, _, s)| m.min(s * (1.0 + 1e-9)));
+                let n = ((len / cap).ceil() as usize).max(min_cells_per_interval.max(1));
                 for s in 1..=n {
                     out.push(w[0] + len * s as f64 / n as f64);
                 }
@@ -197,5 +227,22 @@ mod tests {
         assert_eq!(g.nodes[0], vec![0.0, 0.30, 0.6, 1.0]);
         let total: f64 = (0..g.ncells()).map(|c| g.volume(c)).sum();
         assert!((total - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn local_size_limit() {
+        // block [0.2, 0.6] needs 4 cells: the coarse part [0.2, 0.5] is split
+        // to 0.1 cells, the fine intervals of [0.5, 0.6] are left alone
+        let g = Grid::conforming_limited(
+            [0.0; 3],
+            [1.0; 3],
+            [vec![0.2, 0.5, 0.52, 0.54, 0.6], vec![], vec![]],
+            [1.0; 3],
+            1,
+            0.0,
+            [vec![(0.2, 0.6, 0.1)], vec![], vec![]],
+        );
+        let x: Vec<f64> = g.nodes[0].iter().map(|v| (v * 1e6).round() / 1e6).collect();
+        assert_eq!(x, vec![0.0, 0.2, 0.3, 0.4, 0.5, 0.52, 0.54, 0.6, 1.0]);
     }
 }

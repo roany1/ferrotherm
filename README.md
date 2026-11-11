@@ -136,6 +136,8 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | Celsius EC Solver model with vertical boards (2024.36) | STEP export of the same model made by Celsius | boards, parts and CAD obstructions within 1e-3 mm |
 | Same model solved (sealed conduction-cooled chassis, 3 vertical boards, natural convection + radiation, 18 W; FPBGA "Detailed" packages resolved, Celsius minimum cells, 1.3 M cells) | Temperatures computed by Celsius EC Solver (read from its plot, ±0.3 K) | 2R junctions U1 +0.4 K, U2 −1.1 K; FPGA dies (board 2 / 3) +3.8 / +2.8 K (max), +3.4 / +2.3 K (mean); block parts U3 −1.0, U4 −1.4, U5 −4.4, VR1–VR3 −4.1 … −6.9 K (max of the block). Without the minimum cells the dies are +10 K: grid study of the package alone, die rise 30.5 / 23.3 / 21.6 / 20.5 K at 3.45 / 1 / 0.5 / 0.25 mm |
 | Turbulent channel, k–ε + wall functions (H = 20 mm, Re_H ≈ 12 600, wall cells y* ≈ 18…75) | Dean (1978) C_f, Gnielinski (1976) Nu | C_f −11 % (log law alone gives −5 %), Nu +3 … +5 %; grid-independent within 3 % |
+| Laminar channel one cell wide between isothermal plates (g = 2 mm, L = 20 mm, Re ≈ 125) | Stephan's mean Nusselt number for developing flow (Muzychka & Yovanovich 2004) and the same channel with 8 cells across | one cell 0.2890 W, 8 cells 0.2934 W, correlation 0.2938 W of heat to the air (−1.6 %); still air between a hot and a cold plate across one cell: conduction exact (0.10518 W) |
+| Rack-tutorial heat sink alone in a duct (25 W chip, 18 fins 1 mm, gaps 1.9 mm, k–ε, 2 m/s) | Same case with 3 and 5 cells per fin gap | chip 68.6 °C with one cell per gap before the one-cell-channel model, 53.3 °C with it; 47.5 / 45.8 °C with 3 / 5 cells per gap |
 | k–ε, heated block in a duct (3D, conjugate) | Energy balance | imbalance < 0.01 % |
 | L-shaped board with a hole (polygon outline) | Exact area, power, export/re-import (STL, IDF with cut-out) | area 5900 mm² exact on a matching grid, all power in the board |
 | Celsius "Full Enclosure" rack tutorial (2024.36): 16 blade servers in 4 chassis bays, card bay, power supply, 16 fans, 36 vents | STEP export of the same model made by Celsius | every solid part (16 chips, 16 sockets, 880 heat-sink pieces, 132 sockets, 149 boards, 96 drive pieces, walls), the 16 fans and the 36 vents within 2 µm |
@@ -162,10 +164,13 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
   reports *NOT converged* — look at the Convergence tab and the monitor
   points, or run transient.
 - **Heat sinks need cells in the fin gaps.** The grid is a single
-  conforming Cartesian grid (no local refinement yet): with one cell per
-  gap between fins the fin heat transfer is underpredicted (rack tutorial:
-  chips about 20 K hotter than Celsius). Use at least 3 cells per gap; on
-  large models this is not affordable until phase 3 of the roadmap.
+  conforming Cartesian grid (no local refinement yet). A channel one cell
+  wide (fin gaps on a coarse grid) gets the laminar parallel-plate shear and
+  developing-flow heat transfer (Stephan's correlation), which removes most
+  of the error, not all: on the rack-tutorial heat sink the chip is 53.3 °C
+  with one cell per gap against 45.8 °C with five (68.6 °C without the
+  model). Use at least 3 cells per gap where the heat sink matters; on large
+  models this is not affordable until phase 3 of the roadmap.
 - **Geometry is axis-aligned boxes** (staircase). STEP bodies are imported
   as bounding boxes or voxels; inclined or curved surfaces are approximated.
   Polygon outlines (boards, blocks) are resolved at the cell centres.

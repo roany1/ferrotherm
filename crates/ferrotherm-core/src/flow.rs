@@ -50,6 +50,35 @@ const E_LOG: f64 = 9.793;
 /// y* where the linear and log profiles intersect.
 const YSTAR_LAM: f64 = 11.225;
 const K_MIN: f64 = 1e-10;
+/// Channel one cell wide between two solids: laminar flow between parallel
+/// plates. Wall shear 6μU/g (fully developed) against 2μU/g of the
+/// half-cell gradient; heat transfer to the mixed-mean temperature from
+/// [`nu_plates`], at least Nu = 7.54 on D_h = 2g (both walls heated),
+/// h = 3.77 k/g against 2 k/g.
+const MU_GAP: f64 = 3.0;
+const NU_GAP: f64 = 7.54;
+
+/// Mean Nusselt number (on D_h) between parallel isothermal plates over the
+/// part [x0, x1] of the channel, measured from its entrance, for laminar
+/// simultaneously developing flow: Stephan's correlation for the mean
+/// Nusselt number from the entrance, Nu_m = 7.55 + 0.024 z*^-1.14 /
+/// (1 + 0.0358 Pr^0.17 z*^-0.64), z* = z/(D_h Re Pr), 0.1 < Pr < 1000
+/// (Muzychka & Yovanovich 2004, eq. 16).
+pub fn nu_plates(x0: f64, x1: f64, dh: f64, re_pr: f64, pr: f64) -> f64 {
+    if x1 <= x0 || re_pr <= 0.0 || dh <= 0.0 {
+        return NU_GAP;
+    }
+    let pr17 = pr.clamp(0.1, 1000.0).powf(0.17);
+    // x · Nu_m(x): heat taken up from the entrance to x
+    let f = |x: f64| {
+        if x <= 0.0 {
+            return 0.0;
+        }
+        let z = x / (dh * re_pr);
+        x * (7.55 + 0.024 * z.powf(-1.14) / (1.0 + 0.0358 * pr17 * z.powf(-0.64)))
+    };
+    ((f(x1) - f(x0)) / (x1 - x0)).max(NU_GAP)
+}
 const EPS_MIN: f64 = 1e-14;
 
 const WALL: u8 = 0;
@@ -187,6 +216,11 @@ impl FanDef {
     }
 }
 
+/// Fluid cell filling a channel one cell wide: (cell, axis across the
+/// channel, for each of the other two axes the axis and the extent [lo, hi]
+/// (m) of the run of channel cells along it).
+type GapCell = (usize, usize, [(usize, f64, f64); 2]);
+
 struct Props {
     rho: f64,
     mu: f64,
@@ -267,6 +301,12 @@ struct Solver<'a> {
     k_mol: f64,
     /// Turbulent length scale of the inflow per case boundary, m.
     bnd_len: Vec<f64>,
+    /// Fluid cells with a solid cell on both sides along an axis (a channel
+    /// one cell wide).
+    gap: Vec<[bool; 3]>,
+    /// Those cells: (cell, axis across the channel, for each of the other
+    /// two axes the extent [lo, hi] (m) of the run of channel cells).
+    gaps: Vec<GapCell>,
 }
 
 impl<'a> Solver<'a> {
@@ -586,6 +626,8 @@ impl<'a> Solver<'a> {
             wall_y: vec![],
             k_mol,
             bnd_len: vec![],
+            gap: vec![],
+            gaps: vec![],
         };
         s.d_open = [
             vec![0.0; s.kind[0].len()],
@@ -593,6 +635,7 @@ impl<'a> Solver<'a> {
             vec![0.0; s.kind[2].len()],
         ];
         s.find_pins()?;
+        s.find_gaps();
         if s.cfg.turbulence == Turbulence::Lvel {
             s.wall_distance()?;
         }
@@ -606,6 +649,49 @@ impl<'a> Solver<'a> {
     #[inline]
     fn cell(&self, p: [usize; 3]) -> usize {
         self.m.grid.idx(p[0], p[1], p[2])
+    }
+
+    /// Mark the fluid cells that fill a channel one cell wide.
+    fn find_gaps(&mut self) {
+        let n = self.n;
+        let st = [1usize, n[0], n[0] * n[1]];
+        let g = &self.m.grid;
+        let mut gap = vec![[false; 3]; self.m.ncells];
+        for (c, gc) in gap.iter_mut().enumerate() {
+            if !self.fluid[c] {
+                continue;
+            }
+            let p = g.ijk(c);
+            for a in 0..3 {
+                gc[a] =
+                    p[a] > 0 && p[a] + 1 < n[a] && !self.fluid[c - st[a]] && !self.fluid[c + st[a]];
+            }
+        }
+        let mut gaps = vec![];
+        for c in 0..self.m.ncells {
+            for a in 0..3 {
+                if !gap[c][a] {
+                    continue;
+                }
+                let p = g.ijk(c);
+                let mut runs = [(0, 0.0, 0.0); 2];
+                for (r, b) in (0..3).filter(|&b| b != a).enumerate() {
+                    let (mut i0, mut i1) = (p[b], p[b]);
+                    while i0 > 0 && gap[c - (p[b] - i0 + 1) * st[b]][a] {
+                        i0 -= 1;
+                    }
+                    while i1 + 1 < n[b] && gap[c + (i1 + 1 - p[b]) * st[b]][a] {
+                        i1 += 1;
+                    }
+                    let lo = g.center(b, i0) - 0.5 * g.width(b, i0);
+                    let hi = g.center(b, i1) + 0.5 * g.width(b, i1);
+                    runs[r] = (b, lo, hi);
+                }
+                gaps.push((c, a, runs));
+            }
+        }
+        self.gap = gap;
+        self.gaps = gaps;
     }
 
     /// Domain boundary kind of the boundary face (axis a) in front of cell p on side `hi`.
@@ -1254,15 +1340,17 @@ impl<'a> Solver<'a> {
     /// Effective viscosity of the wall shear on the plane normal to `axis`
     /// next to the velocity face between cells `cl` and `ch`.
     fn mu_wall(&self, st: &State, cl: usize, ch: usize, axis: usize) -> f64 {
-        if !self.ke {
-            return self.props.mu;
-        }
+        let mu = self.props.mu;
         let pick = |c: usize| {
-            let v = st.muw[c][axis];
-            if v > 0.0 {
-                v
+            let v = if self.ke && st.muw[c][axis] > 0.0 {
+                st.muw[c][axis]
             } else {
-                self.props.mu
+                mu
+            };
+            if self.gap[c][axis] {
+                v.max(MU_GAP * mu)
+            } else {
+                v
             }
         };
         0.5 * (pick(cl) + pick(ch))
@@ -1720,6 +1808,66 @@ impl<'a> Solver<'a> {
         let k = self.k_eff(st);
         let mut gc = conductances(g, &k);
         let mut bnd = m.boundary_at(&k);
+        // fluid side of a fluid–solid face: wall function (k–ε) or the
+        // molecular/LVEL conductivity, raised in one-cell channels
+        let kw_of = |cf: usize, a: usize| {
+            if self.ke {
+                st.kw[cf][a]
+            } else {
+                k[cf][a]
+            }
+        };
+        let face_g = |c: usize, cf: usize, cs: usize, a: usize, kw: f64| {
+            g.face_area(c, a)
+                / (0.5 * g.width(a, g.ijk(cf)[a]) / kw + 0.5 * g.width(a, g.ijk(cs)[a]) / k[cs][a])
+        };
+        let mut gap_src = vec![];
+        let alpha = self.k_mol / (self.props.rho * self.props.cp);
+        let pr = self.props.mu * self.props.cp / self.k_mol;
+        for &(c, a, runs) in &self.gaps {
+            {
+                let k0 = kw_of(c, a);
+                if k0 <= 0.0 {
+                    continue;
+                }
+                // developing flow along the run of channel cells in the
+                // main flow direction
+                let p = g.ijk(c);
+                let v = self.cell_velocity(st, c);
+                let (b, lo, hi) = if v[runs[0].0].abs() >= v[runs[1].0].abs() {
+                    runs[0]
+                } else {
+                    runs[1]
+                };
+                let w = g.width(b, p[b]);
+                let f0 = g.center(b, p[b]) - 0.5 * w;
+                let (x0, x1) = if v[b] >= 0.0 {
+                    (f0 - lo, f0 - lo + w)
+                } else {
+                    (hi - f0 - w, hi - f0)
+                };
+                let dh = 2.0 * g.width(a, p[a]);
+                let nu_c = nu_plates(x0, x1, dh, v[b].abs() * dh / alpha, pr);
+                let k1 = k0.max(0.25 * nu_c * self.k_mol);
+                if k1 <= k0 {
+                    continue;
+                }
+                let (lo, hi) = (c - s[a], c + s[a]);
+                let g0 = 0.5 * (face_g(lo, c, lo, a, k0) + face_g(c, c, hi, a, k0));
+                let g1lo = face_g(lo, c, lo, a, k1);
+                let g1hi = face_g(c, c, hi, a, k1);
+                gc[a][lo] = g1lo;
+                gc[a][c] = g1hi;
+                // the raised conductance is for heat given to the flow; the
+                // conduction across the channel (one wall hotter than the
+                // other) stays that of the resolved linear profile: the
+                // excess is taken back explicitly, so the matrix keeps
+                // positive coefficients and the balance closes at convergence
+                let ta = 0.5 * (st.t[lo] - st.t[hi]);
+                let q = (0.5 * (g1lo + g1hi) - g0) * ta;
+                gap_src.push((lo, hi, q));
+            }
+        }
         if self.ke {
             // thermal wall functions: fluid–solid faces and closed domain faces
             for c in 0..nc {
@@ -1733,12 +1881,12 @@ impl<'a> Solver<'a> {
                         continue;
                     }
                     let (cf, cs) = if self.fluid[c] { (c, c2) } else { (c2, c) };
+                    if self.gap[cf][a] {
+                        continue;
+                    }
                     let kw = st.kw[cf][a];
                     if kw > 0.0 {
-                        let pf = g.ijk(cf);
-                        let ps = g.ijk(cs);
-                        gc[a][c] = g.face_area(c, a)
-                            / (0.5 * g.width(a, pf[a]) / kw + 0.5 * g.width(a, ps[a]) / k[cs][a]);
+                        gc[a][c] = face_g(c, cf, cs, a, kw);
                     }
                 }
             }
@@ -1786,6 +1934,10 @@ impl<'a> Solver<'a> {
                 mat.neg[a][c2] = dif + ff.max(0.0);
                 mat.ap[c2] += dif + (-ff).max(0.0);
             }
+        }
+        for &(lo, hi, q) in &gap_src {
+            b[lo] += q;
+            b[hi] -= q;
         }
         for l in &m.links {
             mat.ap[l.a] += l.g;
