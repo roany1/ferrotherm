@@ -141,8 +141,8 @@ transient (follows `[solver] mode`).
 
 | Key | Default | Notes |
 |---|---|---|
-| `turbulence` | `lvel` | `lvel` (algebraic, wall distance + Spalding law), `k_epsilon` (standard k–ε, scalable wall functions; also `k-epsilon`) or `laminar` |
-| `turbulence_intensity` | 0.05 | k–ε: intensity of the air entering through inlets, openings and fans in the wall; length scale 0.07 √A of the boundary |
+| `turbulence` | `lvel` | `lvel` (algebraic, wall distance + Spalding law), `k_epsilon` (standard k–ε, scalable wall functions; also `k-epsilon`), `k_omega_sst` (k–ω SST, automatic wall treatment; also `sst`) or `laminar` |
+| `turbulence_intensity` | 0.05 | k–ε and k–ω SST: intensity of the air entering through inlets, openings and fans in the wall; length scale 0.07 √A of the boundary |
 | `scheme` | `power_law` | or `upwind` |
 | `gravity` | `[0, 0, -9.81]` | m/s²; z up |
 | `reference_temperature_c` | ambient | Boussinesq reference |

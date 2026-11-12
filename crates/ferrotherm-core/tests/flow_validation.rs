@@ -779,5 +779,10 @@ fn sst_channel_wall_insensitivity() {
     let b = turbulent_channel("k_omega_sst", 4.0);
     assert!((a.0 / b.0 - 1.0).abs() < 0.10, "Cf {} vs {}", a.0, b.0);
     assert!((a.2 / b.2 - 1.0).abs() < 0.10, "Nu {} vs {}", a.2, b.2);
-    assert!((a.0 / a.1 - 1.0).abs() < 0.15, "fine-grid Cf {} vs Dean {}", a.0, a.1);
+    assert!(
+        (a.0 / a.1 - 1.0).abs() < 0.15,
+        "fine-grid Cf {} vs Dean {}",
+        a.0,
+        a.1
+    );
 }

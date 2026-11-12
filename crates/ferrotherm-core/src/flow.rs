@@ -653,7 +653,10 @@ impl<'a> Solver<'a> {
         if matches!(s.cfg.turbulence, Turbulence::Lvel | Turbulence::KOmegaSst) {
             s.wall_distance()?;
         }
-        if matches!(s.cfg.turbulence, Turbulence::KEpsilon | Turbulence::KOmegaSst) {
+        if matches!(
+            s.cfg.turbulence,
+            Turbulence::KEpsilon | Turbulence::KOmegaSst
+        ) {
             s.ke = true;
             s.sst = s.cfg.turbulence == Turbulence::KOmegaSst;
             s.ke_setup(case);
@@ -1043,7 +1046,8 @@ impl<'a> Solver<'a> {
                     let fh = fidx(self.fd[a], ph);
                     if self.fluid[c2] && self.kind[a][fh] == ACTIVE {
                         let ff = rho * st.u[a][fh] * area;
-                        let gam = self.props.mu + 0.5 * rho * (st.nut[c] * dmul(c) + st.nut[c2] * dmul(c2));
+                        let gam = self.props.mu
+                            + 0.5 * rho * (st.nut[c] * dmul(c) + st.nut[c2] * dmul(c2));
                         let dd = gam * area / (g.center(a, p[a] + 1) - g.center(a, p[a]));
                         let ce = anb(self.scheme, dd, ff);
                         let cw = anb(self.scheme, dd, -ff);
@@ -1199,8 +1203,9 @@ impl<'a> Solver<'a> {
         let alpha = if prev.is_some() { 1.0 } else { 0.7 };
         let mut lin = 0usize;
         // ---- k ----
-        let (mut mat, mut b) =
-            self.scalar_transport(st, &|_| 1.0 / SIGMA_K, &st.k, &|a, f, u| self.ke_inflow(a, f, u).0);
+        let (mut mat, mut b) = self.scalar_transport(st, &|_| 1.0 / SIGMA_K, &st.k, &|a, f, u| {
+            self.ke_inflow(a, f, u).0
+        });
         for c in 0..nc {
             if !self.fluid[c] {
                 continue;
@@ -1241,7 +1246,9 @@ impl<'a> Solver<'a> {
         st.k = knew;
         // ---- ε ----
         let (mut mat, mut b) =
-            self.scalar_transport(st, &|_| 1.0 / SIGMA_E, &st.eps, &|a, f, u| self.ke_inflow(a, f, u).1);
+            self.scalar_transport(st, &|_| 1.0 / SIGMA_E, &st.eps, &|a, f, u| {
+                self.ke_inflow(a, f, u).1
+            });
         let mut ew = vec![0.0; nc];
         for c in 0..nc {
             if !self.fluid[c] {
@@ -1327,12 +1334,7 @@ impl<'a> Solver<'a> {
 
     /// Gradients at the centre of fluid cell `c`: velocity (`[i][a]` =
     /// ∂v_i/∂x_a, no-slip walls at zero velocity) and temperature.
-    fn vel_temp_grad(
-        &self,
-        st: &State,
-        vc: &[[f64; 3]],
-        c: usize,
-    ) -> ([[f64; 3]; 3], [f64; 3]) {
+    fn vel_temp_grad(&self, st: &State, vc: &[[f64; 3]], c: usize) -> ([[f64; 3]; 3], [f64; 3]) {
         let g = &self.m.grid;
         let n = self.n;
         let s = [1usize, n[0], n[0] * n[1]];
@@ -1498,12 +1500,10 @@ impl<'a> Solver<'a> {
         let mut lin = 0usize;
         let blend = |c: usize, inner: f64, outer: f64| f1[c] * inner + (1.0 - f1[c]) * outer;
         // ---- k ----
-        let (mut mat, mut b) = self.scalar_transport(
-            st,
-            &|c| blend(c, SST_SK1, SST_SK2),
-            &st.k,
-            &|a, f, u| self.sst_inflow(a, f, u).0,
-        );
+        let (mut mat, mut b) =
+            self.scalar_transport(st, &|c| blend(c, SST_SK1, SST_SK2), &st.k, &|a, f, u| {
+                self.sst_inflow(a, f, u).0
+            });
         for c in 0..nc {
             if !self.fluid[c] {
                 continue;
@@ -1538,12 +1538,10 @@ impl<'a> Solver<'a> {
         }
         st.k = knew;
         // ---- ω ----
-        let (mut mat, mut b) = self.scalar_transport(
-            st,
-            &|c| blend(c, SST_SW1, SST_SW2),
-            &st.eps,
-            &|a, f, u| self.sst_inflow(a, f, u).1,
-        );
+        let (mut mat, mut b) =
+            self.scalar_transport(st, &|c| blend(c, SST_SW1, SST_SW2), &st.eps, &|a, f, u| {
+                self.sst_inflow(a, f, u).1
+            });
         for c in 0..nc {
             if !self.fluid[c] || wall[c] {
                 continue;
