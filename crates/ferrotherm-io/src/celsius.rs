@@ -2199,6 +2199,9 @@ pub fn read(data: &[u8]) -> Result<CelsiusModel, String> {
                 {
                     t if t.contains("laminar") => fs.turbulence = Turbulence::Laminar,
                     t if t.contains("lvel") => fs.turbulence = Turbulence::Lvel,
+                    t if t.contains("sst") || t.contains("omega") || t.contains("k-w") => {
+                        fs.turbulence = Turbulence::KOmegaSst
+                    }
                     t if t.contains("epsilon")
                         || t.contains("k-e")
                         || t.contains("k_e")

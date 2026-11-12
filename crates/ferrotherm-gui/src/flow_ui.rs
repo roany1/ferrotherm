@@ -132,6 +132,7 @@ pub fn flow_settings(ui: &mut Ui, f: &mut Option<FlowSettings>, fill: &mut Strin
                 Turbulence::Lvel => "LVEL",
                 Turbulence::Laminar => "Laminar",
                 Turbulence::KEpsilon => "k–ε",
+                Turbulence::KOmegaSst => "k–ω SST",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut s.turbulence, Turbulence::Lvel, "LVEL")
@@ -143,10 +144,15 @@ pub fn flow_settings(ui: &mut Ui, f: &mut Option<FlowSettings>, fill: &mut Strin
                         "Standard k–ε with log-law wall functions: forced flows with \
                          fans/inlets; the wall cells should be in the log layer (y* 30–300)",
                     );
+                ui.selectable_value(&mut s.turbulence, Turbulence::KOmegaSst, "k–ω SST")
+                    .on_hover_text(
+                        "k–ω SST with automatic wall treatment: any near-wall grid, \
+                         better heat transfer in low-Reynolds and separated flows",
+                    );
                 ui.selectable_value(&mut s.turbulence, Turbulence::Laminar, "Laminar");
             });
         ui.end_row();
-        if s.turbulence == Turbulence::KEpsilon {
+        if matches!(s.turbulence, Turbulence::KEpsilon | Turbulence::KOmegaSst) {
             ui.label("Inflow turbulence intensity");
             let mut pct = s.turbulence_intensity * 100.0;
             if num(ui, &mut pct, 0.5, " %").changed() {

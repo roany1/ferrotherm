@@ -136,12 +136,13 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | Celsius EC Solver model with vertical boards (2024.36) | STEP export of the same model made by Celsius | boards, parts and CAD obstructions within 1e-3 mm |
 | Same model solved (sealed conduction-cooled chassis, 3 vertical boards, natural convection + radiation, 18 W; FPBGA "Detailed" packages resolved, Celsius minimum cells, 1.3 M cells) | Temperatures computed by Celsius EC Solver (read from its plot, ±0.3 K) | 2R junctions U1 +0.4 K, U2 −1.1 K; FPGA dies (board 2 / 3) +3.8 / +2.8 K (max), +3.4 / +2.3 K (mean); block parts U3 −1.0, U4 −1.4, U5 −4.4, VR1–VR3 −4.1 … −6.9 K (max of the block). Without the minimum cells the dies are +10 K: grid study of the package alone, die rise 30.5 / 23.3 / 21.6 / 20.5 K at 3.45 / 1 / 0.5 / 0.25 mm |
 | Turbulent channel, k–ε + wall functions (H = 20 mm, Re_H ≈ 12 600, wall cells y* ≈ 18…75) | Dean (1978) C_f, Gnielinski (1976) Nu | C_f −11 % (log law alone gives −5 %), Nu +3 … +5 %; grid-independent within 3 % |
+| Turbulent channel, k–ω SST with automatic wall treatment (same channel, wall cell from 0.25 to 4 mm, y⁺ ≈ 3 … 50) | Dean friction correlation, Gnielinski Nusselt number | C_f −3.6 / −4.8 / −10.5 %, Nu +5.1 / −0.9 / +0.9 % with 0.25 / 2 / 4 mm cells |
 | Laminar channel one cell wide between isothermal plates (g = 2 mm, L = 20 mm, Re ≈ 125) | Stephan's mean Nusselt number for developing flow (Muzychka & Yovanovich 2004) and the same channel with 8 cells across | one cell 0.2890 W, 8 cells 0.2934 W, correlation 0.2938 W of heat to the air (−1.6 %); still air between a hot and a cold plate across one cell: conduction exact (0.10518 W) |
 | Rack-tutorial heat sink alone in a duct (25 W chip, 18 fins 1 mm, gaps 1.9 mm, k–ε, 2 m/s) | Same case with 3 and 5 cells per fin gap | chip 68.6 °C with one cell per gap before the one-cell-channel model, 53.3 °C with it; 47.5 / 45.8 °C with 3 / 5 cells per gap |
 | k–ε, heated block in a duct (3D, conjugate) | Energy balance | imbalance < 0.01 % |
 | L-shaped board with a hole (polygon outline) | Exact area, power, export/re-import (STL, IDF with cut-out) | area 5900 mm² exact on a matching grid, all power in the board |
 | Celsius "Full Enclosure" rack tutorial (2024.36): 16 blade servers in 4 chassis bays, card bay, power supply, 16 fans, 36 vents | STEP export of the same model made by Celsius | every solid part (16 chips, 16 sockets, 880 heat-sink pieces, 132 sockets, 149 boards, 96 drive pieces, walls), the 16 fans and the 36 vents within 2 µm |
-| Same rack solved (1319 W, k–ε, 2.4 M cells with planes closer than 0.9 mm merged, 440 iterations, **not converged**: energy residual 3.6e-3, chip temperatures moving ±0.13 K) | Chip temperatures computed by Celsius EC Solver (4.5 M cells; read from its plot, ±0.5 K) | **open discrepancy:** the 16 chips U1 at 62.6 … 67.3 °C (block mean) against 43.8 … 45.3 °C, i.e. +18 … +23 K. Energy balance closes (1265 W through the openings). The heat sinks have one cell per 1.9 mm fin gap and fin faces merged with nearby planes: fin-to-air ΔT 27 K at 1.1 m/s in the gaps, about twice what a resolved laminar channel gives. A grid with ≥ 3 cells per gap needs local refinement (roadmap phase 3) to fit in memory |
+| Same rack solved (1319 W, k–ε, 2.4 M cells with planes closer than 0.9 mm merged, one cell per 1.9 mm fin gap; **not converged**: stopped at 300 iterations, energy residual 8.8e-3) | Chip temperatures computed by Celsius EC Solver (4.5 M cells; read from its plot, ±0.5 K) | **open discrepancy:** the 16 chips U1 at 56.4 … 61.7 °C (block mean) against 43.8 … 45.3 °C, i.e. +13 … +16 K (62.6 … 67.3 °C before the one-cell-channel model, at 440 iterations). The heat sink alone shows what is left to the grid: 53.3 °C with one cell per gap, 45.8 °C with five. A grid with ≥ 3 cells per gap on the whole rack needs local refinement (roadmap phase 3) |
 | Celsius "Detailed" package (synthetic) | Hand-placed die and substrate | die and substrate at their place in either frame; fallback to one block when the parts fit no frame |
 | Defeaturing: plate with through, blind and counterbored holes, a boss, fillets; chassis shell with 12 vents, 4 screw holes and filleted edges; chamfered cover; two-instance assembly | Exact volumes | plain plate 24 000 mm³, shell 48 992 mm³, cover 15 000 mm³ (all exact); instance names and placements kept |
 | FerroTherm STEP/IDF/STL export | Re-import (OpenCascade for STEP) | boxes recovered within 1e-4 mm |
@@ -154,12 +155,14 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
   LVEL, compact models), but the code is young and validated only on the
   benchmarks above. Compare with measurements or another tool before using
   results for qualification.
-- **Turbulence:** LVEL, standard k–ε or laminar (no k-ω / SST yet). k–ε with
-  wall functions is meant for forced, fully turbulent flows (fans, ducts):
-  on low-Reynolds electronics flows it underpredicts the heat transfer on
-  coarse grids (heated block at 3 m/s, Re ≈ 5600: block 587 °C with 2.5 mm
-  cells, 340 °C with 1 mm cells, against 245 / 302 °C with LVEL). LVEL stays
-  the default for electronics. Strongly separated or unsteady flows may not
+- **Turbulence:** LVEL, standard k–ε, k–ω SST or laminar. k–ε with wall
+  functions and k–ω SST are meant for forced, fully turbulent flows (fans,
+  ducts): on low-Reynolds electronics flows they underpredict the heat
+  transfer on coarse grids (heated block at 3 m/s, Re ≈ 5600: block 587 °C
+  with k–ε and 514 °C with SST on 2.5 mm cells, 340 / 348 °C on 1 mm cells
+  (SST not converged there), against 245 / 302 °C with LVEL; no reference
+  solution for this case yet). LVEL stays the default for electronics. The
+  SST buoyancy source in the ω equation is left out. Strongly separated or unsteady flows may not
   reach a steady residual; the solver then stops at `max_iterations` and
   reports *NOT converged* — look at the Convergence tab and the monitor
   points, or run transient.

@@ -50,6 +50,17 @@ const E_LOG: f64 = 9.793;
 /// y* where the linear and log profiles intersect.
 const YSTAR_LAM: f64 = 11.225;
 const K_MIN: f64 = 1e-10;
+// k–ω SST (Menter, Kuntz & Langtry 2003): inner (1) and outer (2) sets
+const SST_SK1: f64 = 0.85;
+const SST_SW1: f64 = 0.5;
+const SST_B1: f64 = 0.075;
+const SST_G1: f64 = 5.0 / 9.0;
+const SST_SK2: f64 = 1.0;
+const SST_SW2: f64 = 0.856;
+const SST_B2: f64 = 0.0828;
+const SST_G2: f64 = 0.44;
+const SST_BSTAR: f64 = 0.09;
+const SST_A1: f64 = 0.31;
 /// Channel one cell wide between two solids: laminar flow between parallel
 /// plates. Wall shear 6μU/g (fully developed) against 2μU/g of the
 /// half-cell gradient; heat transfer to the mixed-mean temperature from
@@ -301,6 +312,8 @@ struct Solver<'a> {
     k_mol: f64,
     /// Turbulent length scale of the inflow per case boundary, m.
     bnd_len: Vec<f64>,
+    /// k–ω SST instead of k–ε (the ε storage holds ω).
+    sst: bool,
     /// Fluid cells with a solid cell on both sides along an axis (a channel
     /// one cell wide).
     gap: Vec<[bool; 3]>,
@@ -628,6 +641,7 @@ impl<'a> Solver<'a> {
             bnd_len: vec![],
             gap: vec![],
             gaps: vec![],
+            sst: false,
         };
         s.d_open = [
             vec![0.0; s.kind[0].len()],
@@ -636,11 +650,15 @@ impl<'a> Solver<'a> {
         ];
         s.find_pins()?;
         s.find_gaps();
-        if s.cfg.turbulence == Turbulence::Lvel {
+        if matches!(s.cfg.turbulence, Turbulence::Lvel | Turbulence::KOmegaSst) {
             s.wall_distance()?;
         }
-        if s.cfg.turbulence == Turbulence::KEpsilon {
+        if matches!(
+            s.cfg.turbulence,
+            Turbulence::KEpsilon | Turbulence::KOmegaSst
+        ) {
             s.ke = true;
+            s.sst = s.cfg.turbulence == Turbulence::KOmegaSst;
             s.ke_setup(case);
         }
         Ok(s)
@@ -1003,7 +1021,7 @@ impl<'a> Solver<'a> {
     fn scalar_transport(
         &self,
         st: &State,
-        sigma: f64,
+        dmul: &dyn Fn(usize) -> f64,
         phi: &[f64],
         inflow: &dyn Fn(usize, usize, f64) -> f64,
     ) -> (Stencil, Vec<f64>) {
@@ -1028,7 +1046,8 @@ impl<'a> Solver<'a> {
                     let fh = fidx(self.fd[a], ph);
                     if self.fluid[c2] && self.kind[a][fh] == ACTIVE {
                         let ff = rho * st.u[a][fh] * area;
-                        let gam = self.props.mu + 0.5 * rho * (st.nut[c] + st.nut[c2]) / sigma;
+                        let gam = self.props.mu
+                            + 0.5 * rho * (st.nut[c] * dmul(c) + st.nut[c2] * dmul(c2));
                         let dd = gam * area / (g.center(a, p[a] + 1) - g.center(a, p[a]));
                         let ce = anb(self.scheme, dd, ff);
                         let cw = anb(self.scheme, dd, -ff);
@@ -1184,8 +1203,9 @@ impl<'a> Solver<'a> {
         let alpha = if prev.is_some() { 1.0 } else { 0.7 };
         let mut lin = 0usize;
         // ---- k ----
-        let (mut mat, mut b) =
-            self.scalar_transport(st, SIGMA_K, &st.k, &|a, f, u| self.ke_inflow(a, f, u).0);
+        let (mut mat, mut b) = self.scalar_transport(st, &|_| 1.0 / SIGMA_K, &st.k, &|a, f, u| {
+            self.ke_inflow(a, f, u).0
+        });
         for c in 0..nc {
             if !self.fluid[c] {
                 continue;
@@ -1226,7 +1246,9 @@ impl<'a> Solver<'a> {
         st.k = knew;
         // ---- ε ----
         let (mut mat, mut b) =
-            self.scalar_transport(st, SIGMA_E, &st.eps, &|a, f, u| self.ke_inflow(a, f, u).1);
+            self.scalar_transport(st, &|_| 1.0 / SIGMA_E, &st.eps, &|a, f, u| {
+                self.ke_inflow(a, f, u).1
+            });
         let mut ew = vec![0.0; nc];
         for c in 0..nc {
             if !self.fluid[c] {
@@ -1308,6 +1330,311 @@ impl<'a> Solver<'a> {
             }
         }
         lin
+    }
+
+    /// Gradients at the centre of fluid cell `c`: velocity (`[i][a]` =
+    /// ∂v_i/∂x_a, no-slip walls at zero velocity) and temperature.
+    fn vel_temp_grad(&self, st: &State, vc: &[[f64; 3]], c: usize) -> ([[f64; 3]; 3], [f64; 3]) {
+        let g = &self.m.grid;
+        let n = self.n;
+        let s = [1usize, n[0], n[0] * n[1]];
+        let p = g.ijk(c);
+        let mut grad = [[0.0f64; 3]; 3];
+        let mut gt = [0.0f64; 3];
+        for a in 0..3 {
+            let w = g.width(a, p[a]);
+            let x = g.center(a, p[a]);
+            let side = |hi: bool| -> ([f64; 3], f64, f64) {
+                let inner = if hi { p[a] + 1 < n[a] } else { p[a] > 0 };
+                if inner {
+                    let nb = if hi { c + s[a] } else { c - s[a] };
+                    if self.fluid[nb] {
+                        let xn = g.center(a, if hi { p[a] + 1 } else { p[a] - 1 });
+                        return (vc[nb], xn, st.t[nb]);
+                    }
+                }
+                if self.is_wall(c, p, a, hi) {
+                    let xw = if hi { x + 0.5 * w } else { x - 0.5 * w };
+                    return ([0.0; 3], xw, st.t[c]);
+                }
+                (vc[c], x, st.t[c])
+            };
+            let (vl, xl, tl) = side(false);
+            let (vh, xh, th) = side(true);
+            if xh > xl {
+                for i in 0..3 {
+                    grad[i][a] = (vh[i] - vl[i]) / (xh - xl);
+                }
+                gt[a] = (th - tl) / (xh - xl);
+            }
+        }
+        (grad, gt)
+    }
+
+    /// Gradient of a fluid scalar at the centre of cell `c` (zero normal
+    /// gradient at walls and domain faces).
+    fn scalar_grad(&self, phi: &[f64], c: usize) -> [f64; 3] {
+        let g = &self.m.grid;
+        let n = self.n;
+        let s = [1usize, n[0], n[0] * n[1]];
+        let p = g.ijk(c);
+        let mut out = [0.0; 3];
+        for a in 0..3 {
+            let lo = (p[a] > 0 && self.fluid[c - s[a]]).then(|| c - s[a]);
+            let hi = (p[a] + 1 < n[a] && self.fluid[c + s[a]]).then(|| c + s[a]);
+            let (cl, xl) = lo.map_or((c, g.center(a, p[a])), |q| (q, g.center(a, p[a] - 1)));
+            let (ch, xh) = hi.map_or((c, g.center(a, p[a])), |q| (q, g.center(a, p[a] + 1)));
+            if xh > xl {
+                out[a] = (phi[ch] - phi[cl]) / (xh - xl);
+            }
+        }
+        out
+    }
+
+    /// Solve the k and ω equations of the k–ω SST model (Menter, Kuntz &
+    /// Langtry 2003) and update ν_t and the wall treatment. ω is kept in
+    /// `st.eps`. Walls: automatic treatment, blending the viscous sub-layer
+    /// and the log law for the wall shear, ω and the heat transfer (Kader
+    /// 1981), so the result does not depend on where the wall cell falls in
+    /// y⁺. Buoyancy produces k (as in k–ε); its ω source is left out.
+    /// Returns the linear iterations.
+    fn update_sst(&self, st: &mut State, prev: Option<(&State, f64)>) -> usize {
+        let m = self.m;
+        let g = &m.grid;
+        let nc = m.ncells;
+        let rho = self.props.rho;
+        let mu = self.props.mu;
+        let nu = mu / rho;
+        let cp = self.props.cp;
+        let pr = mu * cp / self.k_mol;
+        let grav = self.cfg.gravity;
+        let gmag = (grav[0] * grav[0] + grav[1] * grav[1] + grav[2] * grav[2]).sqrt();
+        let vc: Vec<[f64; 3]> = (0..nc)
+            .map(|c| {
+                if self.fluid[c] {
+                    self.cell_velocity(st, c)
+                } else {
+                    [0.0; 3]
+                }
+            })
+            .collect();
+        // strain rate, blending functions, production
+        let mut smag = vec![0.0; nc];
+        let mut f1 = vec![0.0; nc];
+        let mut f2 = vec![0.0; nc];
+        let mut prod = vec![0.0; nc];
+        let mut gbuo = vec![0.0; nc];
+        let mut cdkw = vec![0.0; nc];
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let (grad, gt) = self.vel_temp_grad(st, &vc, c);
+            let mut s2 = 0.0;
+            for i in 0..3 {
+                for j in 0..3 {
+                    let sij = 0.5 * (grad[i][j] + grad[j][i]);
+                    s2 += 2.0 * sij * sij;
+                }
+            }
+            smag[c] = s2.sqrt();
+            let kk = st.k[c].max(K_MIN);
+            let w = st.eps[c].max(EPS_MIN);
+            let d = self.wall_dist[c].max(1e-7);
+            let gk = self.scalar_grad(&st.k, c);
+            let gw = self.scalar_grad(&st.eps, c);
+            let dot = gk[0] * gw[0] + gk[1] * gw[1] + gk[2] * gw[2];
+            cdkw[c] = 2.0 * rho * SST_SW2 / w * dot;
+            let cd = cdkw[c].max(1e-10);
+            let a_t = kk.sqrt() / (SST_BSTAR * w * d);
+            let a_v = 500.0 * nu / (d * d * w);
+            let arg1 = a_t.max(a_v).min(4.0 * rho * SST_SW2 * kk / (cd * d * d));
+            f1[c] = arg1.powi(4).tanh();
+            let arg2 = (2.0 * a_t).max(a_v);
+            f2[c] = (arg2 * arg2).tanh();
+            let mut_ = rho * st.nut[c];
+            prod[c] = (mut_ * s2).min(10.0 * SST_BSTAR * rho * kk * w);
+            if self.props.beta != 0.0 && gmag > 0.0 {
+                gbuo[c] = self.props.beta
+                    * (mut_ / PR_T)
+                    * (grav[0] * gt[0] + grav[1] * gt[1] + grav[2] * gt[2]);
+            }
+        }
+        // wall cells: friction velocity of the blended wall law and ω
+        let mut wall = vec![false; nc];
+        let mut wwall = vec![0.0f64; nc];
+        let mut utau_w = vec![[0.0f64; 3]; nc];
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let wy = self.wall_y[c];
+            let mut pw = 0.0;
+            for a in 0..3 {
+                let y = wy[a];
+                if y <= 0.0 {
+                    continue;
+                }
+                let v = vc[c];
+                let ut = (0..3)
+                    .filter(|&i| i != a)
+                    .map(|i| v[i] * v[i])
+                    .sum::<f64>()
+                    .sqrt();
+                let uta = blended_utau(ut, y, nu);
+                utau_w[c][a] = uta;
+                let w_vis = 6.0 * nu / (SST_B1 * y * y);
+                let w_log = uta / (SST_BSTAR.sqrt() * KAPPA * y);
+                let ww = (w_vis * w_vis + w_log * w_log).sqrt();
+                wall[c] = true;
+                wwall[c] = wwall[c].max(ww);
+                pw += rho * uta * uta * uta / (KAPPA * y);
+            }
+            // production of a wall cell: the cell-centre gradient overstates
+            // it in the log layer (U/y instead of u_τ/κy); τ_w u_τ/(κ y)
+            if wall[c] {
+                prod[c] = prod[c].min(pw);
+            }
+        }
+        let alpha = if prev.is_some() { 1.0 } else { 0.7 };
+        let mut lin = 0usize;
+        let blend = |c: usize, inner: f64, outer: f64| f1[c] * inner + (1.0 - f1[c]) * outer;
+        // ---- k ----
+        let (mut mat, mut b) =
+            self.scalar_transport(st, &|c| blend(c, SST_SK1, SST_SK2), &st.k, &|a, f, u| {
+                self.sst_inflow(a, f, u).0
+            });
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let vol = g.volume(c);
+            let kk = st.k[c].max(K_MIN);
+            let w = st.eps[c].max(EPS_MIN);
+            mat.ap[c] += SST_BSTAR * rho * w * vol;
+            let src = prod[c] + gbuo[c];
+            if src >= 0.0 {
+                b[c] += src * vol;
+            } else {
+                mat.ap[c] += -src / kk * vol;
+            }
+        }
+        self.finish_scalar(
+            &mut mat,
+            &mut b,
+            &st.k,
+            prev.map(|(p, dt)| (p.k.as_slice(), dt)),
+            alpha,
+        );
+        let mut knew = st.k.clone();
+        let sol = bicgstab(&mat, &b, &mut knew, 1e-3, 0.0, 100);
+        lin += sol.iterations;
+        for c in 0..nc {
+            knew[c] = if self.fluid[c] && knew[c].is_finite() {
+                knew[c].max(K_MIN)
+            } else {
+                st.k[c]
+            };
+        }
+        st.k = knew;
+        // ---- ω ----
+        let (mut mat, mut b) =
+            self.scalar_transport(st, &|c| blend(c, SST_SW1, SST_SW2), &st.eps, &|a, f, u| {
+                self.sst_inflow(a, f, u).1
+            });
+        for c in 0..nc {
+            if !self.fluid[c] || wall[c] {
+                continue;
+            }
+            let vol = g.volume(c);
+            let w = st.eps[c].max(EPS_MIN);
+            let gam = blend(c, SST_G1, SST_G2);
+            let beta = blend(c, SST_B1, SST_B2);
+            mat.ap[c] += beta * rho * w * vol;
+            // γ P̃_k / ν_t (γ ρ S² where ν_t vanishes)
+            let pw = if st.nut[c] > 1e-12 * nu {
+                gam * prod[c] / st.nut[c]
+            } else {
+                gam * rho * smag[c] * smag[c]
+            };
+            b[c] += pw.max(0.0) * vol;
+            let cd = (1.0 - f1[c]) * cdkw[c];
+            if cd >= 0.0 {
+                b[c] += cd * vol;
+            } else {
+                mat.ap[c] += -cd / w * vol;
+            }
+        }
+        self.finish_scalar(
+            &mut mat,
+            &mut b,
+            &st.eps,
+            prev.map(|(p, dt)| (p.eps.as_slice(), dt)),
+            alpha,
+        );
+        let mut wnew = st.eps.clone();
+        for c in 0..nc {
+            if wall[c] {
+                mat.fix(c);
+                b[c] = wwall[c];
+                wnew[c] = wwall[c];
+            }
+        }
+        let sol = bicgstab(&mat, &b, &mut wnew, 1e-3, 0.0, 100);
+        lin += sol.iterations;
+        for c in 0..nc {
+            wnew[c] = if self.fluid[c] && wnew[c].is_finite() {
+                wnew[c].max(EPS_MIN)
+            } else {
+                st.eps[c]
+            };
+        }
+        st.eps = wnew;
+        // ---- ν_t and wall treatment ----
+        for c in 0..nc {
+            if !self.fluid[c] {
+                continue;
+            }
+            let kk = st.k[c];
+            let w = st.eps[c].max(EPS_MIN);
+            let nut = (SST_A1 * kk / (SST_A1 * w).max(smag[c] * f2[c])).min(1e5 * nu);
+            st.nut[c] = 0.3 * st.nut[c] + 0.7 * nut;
+            let wy = self.wall_y[c];
+            let v = vc[c];
+            for a in 0..3 {
+                let y = wy[a];
+                if y <= 0.0 {
+                    st.muw[c][a] = 0.0;
+                    st.kw[c][a] = 0.0;
+                    continue;
+                }
+                let ut = (0..3)
+                    .filter(|&i| i != a)
+                    .map(|i| v[i] * v[i])
+                    .sum::<f64>()
+                    .sqrt();
+                let uta = utau_w[c][a];
+                st.muw[c][a] = if ut > 1e-12 {
+                    (rho * uta * uta * y / ut).max(mu)
+                } else {
+                    mu
+                };
+                let yp = uta * y / nu;
+                let tp = kader_tplus(yp, pr);
+                st.kw[c][a] = if tp > 0.0 {
+                    (rho * cp * uta * y / tp).max(self.k_mol)
+                } else {
+                    self.k_mol
+                };
+            }
+        }
+        lin
+    }
+
+    /// Inflow (k, ω) through boundary face f of axis a at speed |u|.
+    fn sst_inflow(&self, a: usize, f: usize, speed: f64) -> (f64, f64) {
+        let (k, e) = self.ke_inflow(a, f, speed);
+        (k, (e / (SST_BSTAR * k)).max(EPS_MIN))
     }
 
     /// Transient term and steady under-relaxation of a k/ε equation.
@@ -2104,6 +2431,53 @@ fn face_area(m: &Model, fd: [usize; 3], a: usize, f: usize) -> f64 {
 }
 
 /// ν_t/ν from Spalding's law for the local Reynolds number Re = |U|·L/ν.
+/// Friction velocity at a wall cell (distance y, tangential speed u):
+/// viscous sub-layer u_τ = √(νu/y) and log law u = u_τ/κ ln(E y⁺) blended
+/// as (u_vis⁴ + u_log⁴)^¼ (automatic wall treatment, Menter 2003).
+pub fn blended_utau(u: f64, y: f64, nu: f64) -> f64 {
+    if u <= 0.0 || y <= 0.0 {
+        return 0.0;
+    }
+    let u_vis = (nu * u / y).sqrt();
+    // log law by fixed-point iteration from the viscous estimate
+    let mut ut = u_vis;
+    let mut u_log = 0.0;
+    for _ in 0..30 {
+        let yp = ut * y / nu;
+        let arg = E_LOG * yp;
+        if arg <= std::f64::consts::E {
+            u_log = 0.0;
+            break;
+        }
+        let next = KAPPA * u / arg.ln();
+        if (next - ut).abs() <= 1e-10 * ut.max(1e-30) {
+            u_log = next;
+            break;
+        }
+        ut = next;
+        u_log = next;
+    }
+    (u_vis.powi(4) + u_log.powi(4)).powf(0.25)
+}
+
+/// Dimensionless temperature T⁺ at y⁺ across the viscous and log layers
+/// (Kader 1981, near-wall form): T⁺ = Pr y⁺ e^−Γ + (2.12 ln(1 + y⁺) + β) e^−1/Γ,
+/// Γ = 0.01 (Pr y⁺)⁴ / (1 + 5 Pr³ y⁺), β = (3.85 Pr^⅓ − 1.3)² + 2.12 ln Pr.
+pub fn kader_tplus(yp: f64, pr: f64) -> f64 {
+    if yp <= 0.0 {
+        return 0.0;
+    }
+    let gam = 0.01 * (pr * yp).powi(4) / (1.0 + 5.0 * pr.powi(3) * yp);
+    let beta = (3.85 * pr.powf(1.0 / 3.0) - 1.3).powi(2) + 2.12 * pr.ln();
+    let lin = pr * yp * (-gam).exp();
+    let log = if gam > 0.0 {
+        (2.12 * (1.0 + yp).ln() + beta) * (-1.0 / gam).exp()
+    } else {
+        0.0
+    };
+    lin + log
+}
+
 pub fn spalding_nut_ratio(re: f64) -> f64 {
     if !(re > 0.0) {
         return 0.0;
@@ -2159,6 +2533,8 @@ pub fn run(
     };
     if sv.ke {
         let (k0, e0) = sv.ke_initial();
+        // SST keeps ω = ε / (β* k) in the ε storage
+        let e0 = if sv.sst { e0 / (SST_BSTAR * k0) } else { e0 };
         for c in 0..nc {
             if sv.fluid[c] {
                 st.k[c] = k0;
@@ -2185,7 +2561,9 @@ pub fn run(
         if lvel {
             sv.update_nut(st);
         }
-        if sv.ke {
+        if sv.sst {
+            *lin_it += sv.update_sst(st, prev);
+        } else if sv.ke {
             *lin_it += sv.update_ke(st, prev);
         }
         sv.update_fans(st);
@@ -2566,6 +2944,7 @@ pub fn run(
                 Turbulence::Laminar => "laminar".into(),
                 Turbulence::Lvel => "LVEL".into(),
                 Turbulence::KEpsilon => "k-epsilon".into(),
+                Turbulence::KOmegaSst => "k-omega SST".into(),
             },
             averaged_iterations: averaged,
             oscillation_k: oscillation,

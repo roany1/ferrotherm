@@ -17,7 +17,10 @@ Done and validated (see README → Verification):
 - Conduction, conjugate CFD (SIMPLEC, Boussinesq), transient, internal
   surface-to-surface radiation, solar load, k(T).
 - Turbulence: LVEL, **standard k–ε with scalable wall functions** for
-  momentum and heat and buoyancy production, laminar.
+  momentum and heat and buoyancy production, **k–ω SST with automatic wall
+  treatment** (validated on the turbulent channel only), laminar.
+- Channels one cell wide (fin gaps on coarse grids): laminar parallel-plate
+  shear and developing-flow heat transfer.
 - Fans (P–Q curve), vents, inlets, grilles/perforated plates, plate-fin
   heat sinks, monitor points.
 - Compact models: 2R and DELPHI multi-node, SD-18 derating check.
@@ -52,9 +55,10 @@ Done and validated (see README → Verification):
 
 ## Phase 2 — Turbulence and wall treatment
 
-- k–ω SST (Menter 1994) with automatic wall treatment (y⁺ insensitive),
-  needed for the low-Reynolds flows where k–ε with wall functions
-  underestimates heat transfer.
+- k–ω SST is in (Menter, Kuntz & Langtry 2003, automatic wall treatment),
+  validated on the turbulent channel. Still to do: on the low-Reynolds
+  heated block it is as far from LVEL as k–ε, so a reference solution is
+  needed to tell which is right; buoyancy source in the ω equation.
 - y⁺/y* reported per wall in the results.
 - Validation: turbulent channel (already for k–ε), backward-facing step
   (reattachment length, Driver & Seegmiller 1985), heated block in a channel
