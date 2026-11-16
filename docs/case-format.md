@@ -166,6 +166,7 @@ with a low continuity residual (reported as "temperatures settled").
 | `size` | `[a, b]` rectangular face in the two in-plane axes |
 | `curve` | `[[Q m³/s, Δp Pa], ...]` with increasing Q (datasheet curve) — **or** — |
 | `flow_m3_s` | Fixed volume flow |
+| `curve_pressure` | `"static"` (default: datasheet static pressure, the solver adds the outlet dynamic pressure ½ρ(Q/A)² over the free fan area, A = annulus between hub and diameter) or `"total"` (the curve is the total pressure rise) |
 
 A fan on the domain boundary draws from (or blows to) the ambient; inside
 the domain it is a pressure-jump plane. 1 CFM = 4.7195e-4 m³/s.

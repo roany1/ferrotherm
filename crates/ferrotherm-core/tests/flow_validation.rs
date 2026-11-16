@@ -208,11 +208,13 @@ fn forced_convection_energy_balance() {
 }
 
 /// Fan with a linear curve in a frictionless duct (symmetry walls) with a
-/// grille: the operating point must satisfy
-/// P0 (1 − Q/Qmax) = ½ρ (1 + ζ + ζ_exit) (Q/A)², with ζ_exit = 0.01 (solver floor).
-#[test]
-fn fan_operating_point() {
-    let s = sim(r#"
+/// grille. A static-pressure curve (the default, as on data sheets) is the
+/// total rise minus the outlet dynamic pressure ½ρ(Q/A)², so the operating
+/// point satisfies P0 (1 − Q/Qmax) + ½ρ(Q/A)² = ½ρ (1 + ζ + ζ_exit) (Q/A)²;
+/// a total-pressure curve drops the ½ρ(Q/A)² on the left. ζ_exit = 0.01
+/// (solver floor).
+fn fan_operating_point(curve_pressure: &str, dynamic: f64) {
+    let s = sim(&format!(r#"
         [domain]
         min = [0, 0, 0]
         max = [300, 50, 50]
@@ -230,12 +232,13 @@ fn fan_operating_point() {
         direction = "+x"
         size = [50, 50]
         curve = [[0.0, 20.0], [0.02, 0.0]]
+        curve_pressure = "{curve_pressure}"
         [[resistances]]
         name = "grille"
         center = [200, 25, 25]
         axis = "x"
         size = [50, 50]
-        loss = { zeta = 3.0 }
+        loss = {{ zeta = 3.0 }}
         [[boundaries]]
         face = "xmin"
         type = "opening"
@@ -256,21 +259,31 @@ fn fan_operating_point() {
         [[boundaries]]
         face = "zmax"
         type = "symmetry"
-    "#);
+    "#));
     let out = s.run(|_| {}).unwrap();
     let f = out.result.flow.as_ref().unwrap();
     assert!(f.converged, "{:?}", f.residuals.last());
     let q = f.fans[0].flow_m3_s;
     // solve the 1D operating point
     let a = 0.05 * 0.05;
-    let k = 0.5 * AIR_RHO * (1.0 + 3.0 + 0.01) / (a * a);
+    let k = 0.5 * AIR_RHO * (1.0 + 3.0 + 0.01 - dynamic) / (a * a);
     // 20 (1 − Q/0.02) = k Q²  →  k Q² + 1000 Q − 20 = 0
     let qx = (-1000.0 + (1000.0f64 * 1000.0 + 4.0 * k * 20.0).sqrt()) / (2.0 * k);
     eprintln!(
-        "FAN: Q {q:.6} expected {qx:.6}, dp {:.3} Pa",
+        "FAN ({curve_pressure}): Q {q:.6} expected {qx:.6}, dp {:.3} Pa",
         f.fans[0].pressure_pa
     );
     assert!((q / qx - 1.0).abs() < 0.02);
+}
+
+#[test]
+fn fan_operating_point_static_curve() {
+    fan_operating_point("static", 1.0);
+}
+
+#[test]
+fn fan_operating_point_total_curve() {
+    fan_operating_point("total", 0.0);
 }
 
 /// Grey radiation between two parallel plates (gap 5 mm, 100 × 100 mm),

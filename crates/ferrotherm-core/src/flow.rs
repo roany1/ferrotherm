@@ -25,7 +25,7 @@
 //!   log-law shear and heat transfer.
 //! * Energy: conduction everywhere + advection in the fluid, k_eff = k + ρ c_p ν_t / Pr_t.
 
-use crate::case::{BoundaryKind, Case, Face, FlowSettings, Mode, Scheme, Turbulence};
+use crate::case::{BoundaryKind, Case, CurvePressure, Face, FlowSettings, Mode, Scheme, Turbulence};
 use crate::error::{Error, Result};
 use crate::library::interp;
 use crate::model::{axis_of, conductances, direction_of, fan_extent, tangential, Model};
@@ -200,7 +200,10 @@ struct FanDef {
     boundary: bool,
     curve: Vec<[f64; 2]>,
     fixed: Option<f64>,
-    /// Linearisation (P0, slope, Q0).
+    /// ½ρ/A² for a static-pressure curve (0 for a total-pressure curve): the
+    /// pressure jump across the plane is the total rise, curve + ½ρ(Q/A)².
+    dynamic: f64,
+    /// Linearisation (P0, slope, Q0) of the pressure jump.
     lin: (f64, f64, f64),
 }
 
@@ -221,9 +224,14 @@ impl FanDef {
         }
         interp(c, q)
     }
+    /// Pressure jump across the fan plane (total pressure rise), Pa.
+    fn jump(&self, q: f64) -> f64 {
+        self.pressure(q) + self.dynamic * q * q.abs()
+    }
+    /// Slope of the jump, kept ≤ 0 so the linearisation stays stable.
     fn slope(&self, q: f64) -> f64 {
         let h = 1e-6 + 1e-3 * self.curve.last().map(|r| r[0].abs()).unwrap_or(1.0);
-        ((self.pressure(q + h) - self.pressure(q - h)) / (2.0 * h)).min(0.0)
+        ((self.jump(q + h) - self.jump(q - h)) / (2.0 * h)).min(0.0)
     }
 }
 
@@ -709,6 +717,10 @@ impl<'a> Solver<'a> {
                 boundary,
                 curve: f.curve.clone(),
                 fixed: f.flow_m3_s,
+                dynamic: match f.curve_pressure {
+                    CurvePressure::Static => 0.5 * props.rho / (area * area),
+                    CurvePressure::Total => 0.0,
+                },
                 lin: (f.curve.first().map(|r| r[1]).unwrap_or(0.0), 0.0, 0.0),
             });
         }
@@ -1850,7 +1862,7 @@ impl<'a> Solver<'a> {
                 .iter()
                 .map(|&f| fan.dir * st.u[a][f] * face_area(self.m, self.fd[a], a, f))
                 .sum();
-            let p0 = fan.pressure(q);
+            let p0 = fan.jump(q);
             let s = fan.slope(q);
             fan.lin = (p0, s, q);
         }

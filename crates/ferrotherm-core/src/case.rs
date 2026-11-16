@@ -278,6 +278,26 @@ pub struct Fan {
     /// Fixed volume flow, m³/s (instead of a curve).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_m3_s: Option<f64>,
+    /// What the curve pressure is: "static" (default, as in fan data sheets:
+    /// total pressure rise minus the dynamic pressure at the fan outlet, so
+    /// the solver adds ½ρ(Q/A)² over the fan's free area) or "total".
+    #[serde(default, skip_serializing_if = "CurvePressure::is_static")]
+    pub curve_pressure: CurvePressure,
+}
+
+/// Meaning of the pressure in a fan curve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurvePressure {
+    #[default]
+    Static,
+    Total,
+}
+
+impl CurvePressure {
+    pub fn is_static(&self) -> bool {
+        *self == CurvePressure::Static
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

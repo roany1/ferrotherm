@@ -984,6 +984,7 @@ impl FerroApp {
             // generic 40 mm-class curve: replace with the datasheet
             curve: vec![[0.0, 30.0], [0.0025, 20.0], [0.005, 8.0], [0.0065, 0.0]],
             flow_m3_s: None,
+            curve_pressure: Default::default(),
         });
         self.sel = Sel::Fan(self.case.fans.len() - 1);
         self.ensure_flow_on();

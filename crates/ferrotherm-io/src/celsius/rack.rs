@@ -468,6 +468,7 @@ fn fan(
                 size: None,
                 curve,
                 flow_m3_s: flow,
+                curve_pressure: Default::default(),
             });
         }
     } else {
