@@ -392,6 +392,36 @@ fn fan(
             point(axis, outer, o1 + r * a.cos(), o2 + r * a.sin())
         })
         .collect();
+    // housing: a square frame of the overall size, from the wall to the fan
+    // plane, with the circular bore open, so the air pushed by the fan
+    // cannot flow back around it (Celsius fans are square-housed)
+    if housing >= dia && th > wall_t + 1e-6 {
+        let p = outer + s_in * wall_t;
+        let (z0, z1) = (p.min(plane), p.max(plane));
+        let lo = point(axis, z0, o1 - housing / 2.0, o2 - housing / 2.0);
+        let hi = point(axis, z1, o1 + housing / 2.0, o2 + housing / 2.0);
+        let (lo, hi) = (
+            [0, 1, 2].map(|k| lo[k].min(hi[k])),
+            [0, 1, 2].map(|k| lo[k].max(hi[k])),
+        );
+        let bore: Vec<V3> = ring
+            .iter()
+            .map(|q| {
+                let mut q = *q;
+                q[axis] = z0;
+                q
+            })
+            .collect();
+        ctx.block_holes(
+            pose,
+            &format!("{name}/housing"),
+            mat.to_string(),
+            lo,
+            hi,
+            axis,
+            &[bore],
+        );
+    }
     // fan heat into the hub (a square of the hub area)
     let heat = at(n, "Cooling/Heat_Dissipation")
         .filter(|h| {
