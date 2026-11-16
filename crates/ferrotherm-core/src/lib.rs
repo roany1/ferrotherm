@@ -37,6 +37,7 @@ pub mod radiation;
 pub mod report;
 pub mod simulate;
 pub mod stencil;
+pub mod submodel;
 pub mod vtk;
 
 pub use case::Case;

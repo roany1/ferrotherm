@@ -19,6 +19,8 @@ Done and validated (see README → Verification):
 - Turbulence: LVEL, **standard k–ε with scalable wall functions** for
   momentum and heat and buoyancy production, **k–ω SST with automatic wall
   treatment** (validated on the turbulent channel only), laminar.
+- Checkpoint/restart of steady flow solves; **sub-models** (zoom-in on a box
+  of a solved case with a finer grid, one-way).
 - Channels one cell wide (fin gaps on coarse grids): laminar parallel-plate
   shear and developing-flow heat transfer.
 - Fans (P–Q curve), vents, inlets, grilles/perforated plates, plate-fin

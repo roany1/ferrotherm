@@ -463,6 +463,22 @@ ferma; con `--restart` riparte da lì. Così un calcolo lungo non si perde se
 viene interrotto, e uno fermato al numero massimo di iterazioni può
 proseguire. Il file vale solo per la stessa geometria e la stessa griglia.
 
+**Sottomodello (zoom).** `ferrotherm zoom` ritaglia una scatola da un caso
+già risolto e la scrive come nuovo caso con griglia più fine:
+
+```
+ferrotherm zoom box.toml --solution risultati/box.ftc --around U1 --margin 15 --cell 0.5 -o u1.toml
+ferrotherm run u1.toml -o risultati_u1
+```
+
+Sulle facce della scatola vengono imposte le velocità e le temperature
+dell'aria della soluzione grossolana; i solidi tagliati tengono la loro
+temperatura; la faccia da cui esce più aria resta aperta. Serve a risolvere i
+canali tra le alette o un package dentro un modello troppo grande per una
+griglia fine ovunque. L'accoppiamento è a senso unico: tenere le facce della
+scatola lontane da ciò che si vuole risolvere (qualche centimetro a monte e a
+valle di un dissipatore) e includere la scheda sotto i componenti.
+
 `ferrotherm run` termina con codice **2** se un componente supera il suo
 limite di Tj e con codice **3** se il calcolo del flusso non è arrivato a
 convergenza: si può usare come controllo automatico. Un calcolo stazionario

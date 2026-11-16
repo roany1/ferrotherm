@@ -98,6 +98,7 @@ $F export box.toml box.step                 # also .stl, .emn (IDF)
 $F check box.toml
 $F run box.toml -o results
 $F run box.toml -o results --restart results/box.ftc   # continue a flow solve
+$F zoom box.toml --solution results/box.ftc --around U1 --margin 15 --cell 0.5 -o u1.toml   # sub-model
 $F materials | packages | finishes | environments | deratings
 $F pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
 ```
@@ -107,6 +108,17 @@ iterations (`--checkpoint-every`) and when it stops; `--restart` continues
 from it, so a long solve survives an interruption and a solve that stopped
 at `max_iterations` can go on. The checkpoint is valid only for the same
 geometry and grid.
+
+**Sub-model (zoom-in).** `ferrotherm zoom` cuts a box out of a solved case
+(around the blocks whose name starts with `--around`, plus `--margin`, or
+`--box`) and writes it as a new case with a finer grid (`--cell`): the
+coarse velocities and air temperatures are imposed on the faces of the box,
+cut solids keep their coarse temperature, and the face with the largest
+outflow is left open. It is the way to resolve fin gaps or a package inside
+a model too large for a fine grid everywhere. One-way: the coarse solution
+is not corrected, so keep the box faces away from what you want to resolve
+(a few centimetres upstream and downstream of a heat sink) and include the
+board under the parts.
 
 `ferrotherm run` exits with code **2** when a component exceeds its Tj
 limit and with code **3** when the flow solution did not converge (2 wins when
@@ -145,6 +157,7 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | Turbulent channel, k–ε + wall functions (H = 20 mm, Re_H ≈ 12 600, wall cells y* ≈ 18…75) | Dean (1978) C_f, Gnielinski (1976) Nu | C_f −11 % (log law alone gives −5 %), Nu +3 … +5 %; grid-independent within 3 % |
 | Turbulent channel, k–ω SST with automatic wall treatment (same channel, wall cell from 0.25 to 4 mm, y⁺ ≈ 3 … 50) | Dean friction correlation, Gnielinski Nusselt number | C_f −3.6 / −4.8 / −10.5 %, Nu +5.1 / −0.9 / +0.9 % with 0.25 / 2 / 4 mm cells |
 | Laminar channel one cell wide between isothermal plates (g = 2 mm, L = 20 mm, Re ≈ 125) | Stephan's mean Nusselt number for developing flow (Muzychka & Yovanovich 2004) and the same channel with 8 cells across | one cell 0.2890 W, 8 cells 0.2934 W, correlation 0.2938 W of heat to the air (−1.6 %); still air between a hot and a cold plate across one cell: conduction exact (0.10518 W) |
+| Sub-model: heated block in a laminar duct on 4 mm cells, then a box around it on 1 mm cells with the coarse flow on its faces | Whole duct on 1 mm cells | block 68.8 °C (fine), 103.1 °C (coarse), **69.6 °C** (sub-model). Rack-tutorial heat sink in a duct, k–ε: 47.5 °C (fine), 53.4 °C (coarse), **48.0 °C** (sub-model, 96 k cells instead of 224 k) |
 | Rack-tutorial heat sink alone in a duct (25 W chip, 18 fins 1 mm, gaps 1.9 mm, k–ε, 2 m/s) | Same case with 3 and 5 cells per fin gap | chip 68.6 °C with one cell per gap before the one-cell-channel model, 53.3 °C with it; 47.5 / 45.8 °C with 3 / 5 cells per gap |
 | k–ε, heated block in a duct (3D, conjugate) | Energy balance | imbalance < 0.01 % |
 | L-shaped board with a hole (polygon outline) | Exact area, power, export/re-import (STL, IDF with cut-out) | area 5900 mm² exact on a matching grid, all power in the board |

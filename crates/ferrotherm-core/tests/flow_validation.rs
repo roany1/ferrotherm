@@ -875,3 +875,77 @@ fn sst_channel_wall_insensitivity() {
         a.1
     );
 }
+
+/// Sub-model ("zoom-in"): a heated block in a duct solved on a coarse grid,
+/// then a box around the block cut out and solved on a fine grid with the
+/// coarse flow and temperatures on its faces. The block temperature must
+/// come close to that of the whole duct solved on the fine grid.
+#[test]
+fn submodel_matches_fine_solution() {
+    let case = |cell: f64| {
+        format!(
+            r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [20, 80, 20]
+        material = "air"
+        [grid]
+        max_cell_mm = {cell}
+        [flow]
+        turbulence = "laminar"
+        gravity = [0, 0, 0]
+        max_iterations = 2000
+        tolerance = 1e-5
+        [[blocks]]
+        name = "floor"
+        material = "fr4"
+        min = [0, 0, 0]
+        max = [20, 80, 2]
+        [[blocks]]
+        name = "chip"
+        material = "al-6061-t6"
+        power_w = 0.5
+        min = [6, 22, 2]
+        max = [14, 30, 5]
+        [[boundaries]]
+        face = "ymin"
+        type = "inlet"
+        velocity_m_s = 1.0
+        t_ambient_c = 20
+        region = {{ min = [0, 2], max = [20, 20] }}
+        [[boundaries]]
+        face = "ymax"
+        type = "opening"
+        t_ambient_c = 20
+        region = {{ min = [0, 2], max = [20, 20] }}
+        "#
+        )
+    };
+    let dir = std::env::temp_dir().join(format!("ferrotherm-zoom-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let chip = |r: &Report| r.blocks.iter().find(|b| b.name == "chip").unwrap().t_avg_c;
+    let fine = sim(&case(1.0)).run(|_| {}).unwrap();
+    assert!(fine.result.flow.as_ref().unwrap().converged);
+    let mut coarse = sim(&case(4.0));
+    coarse.options.checkpoint = Some(dir.join("coarse.ftc"));
+    let c = coarse.run(|_| {}).unwrap();
+    assert!(c.result.flow.as_ref().unwrap().converged);
+    let sol = ferrotherm_core::flow::Checkpoint::read(&dir.join("coarse.ftc")).unwrap();
+    let (mut sub, info) =
+        ferrotherm_core::submodel::submodel(&coarse, &sol, [2.0, 12.0, 0.0], [18.0, 44.0, 14.0])
+            .unwrap();
+    assert_eq!(info.open_face, Some(ferrotherm_core::case::Face::Ymax));
+    assert!((info.power_w - 0.5).abs() < 1e-9);
+    sub.grid.max_cell_mm = ferrotherm_core::case::MaybeVec3::Vec3([1.0; 3]);
+    let s = Simulation::new(sub, std::path::Path::new(".")).unwrap();
+    let z = s.run(|_| {}).unwrap();
+    assert!(z.result.flow.as_ref().unwrap().converged);
+    let (tf, tc, tz) = (chip(&fine.report), chip(&c.report), chip(&z.report));
+    eprintln!("SUBMODEL chip: fine {tf:.2} °C, coarse {tc:.2} °C, sub-model {tz:.2} °C");
+    assert!(
+        (tz - tf).abs() < 0.1 * (tf - 20.0),
+        "sub-model {tz} vs fine {tf}"
+    );
+    assert!((tz - tf).abs() < 0.5 * (tc - tf).abs());
+    std::fs::remove_dir_all(&dir).ok();
+}

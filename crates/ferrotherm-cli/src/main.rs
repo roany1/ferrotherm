@@ -1,7 +1,7 @@
 // FerroTherm — Copyright (c) 2026 Roany Romano
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ferrotherm_core::pcb::PcbStack;
 use ferrotherm_core::{Case, Library, Simulation};
@@ -46,6 +46,31 @@ enum Cmd {
     },
     /// Validate a case and show the grid without solving.
     Check { case: PathBuf },
+    /// Cut a box out of a solved case to solve it again on a finer grid
+    /// ("zoom-in"): the flow and the temperatures of the coarse solution are
+    /// imposed on the faces of the box.
+    Zoom {
+        case: PathBuf,
+        /// Solution of the coarse case (<output directory>/<case name>.ftc).
+        #[arg(long)]
+        solution: PathBuf,
+        /// Box around the blocks whose name starts with this (repeatable) …
+        #[arg(long)]
+        around: Vec<String>,
+        /// … enlarged by this margin, mm: one value, or six
+        /// (xmin,xmax,ymin,ymax,zmin,zmax).
+        #[arg(long, default_value = "10")]
+        margin: String,
+        /// Or the box itself, mm: x0,y0,z0,x1,y1,z1.
+        #[arg(long = "box")]
+        box_mm: Option<String>,
+        /// Largest cell of the sub-model, mm: one value or x,y,z.
+        #[arg(long)]
+        cell: Option<String>,
+        /// Sub-model case file to write.
+        #[arg(short, long)]
+        out: PathBuf,
+    },
     /// Write the example MIL enclosure case to a file.
     Init {
         #[arg(default_value = "enclosure.toml")]
@@ -316,9 +341,82 @@ fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
+fn numbers(s: &str, what: &str) -> Result<Vec<f64>> {
+    s.split(',')
+        .map(|v| {
+            v.trim()
+                .parse::<f64>()
+                .with_context(|| format!("{what}: '{v}' is not a number"))
+        })
+        .collect()
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Zoom {
+            case,
+            solution,
+            around,
+            margin,
+            box_mm,
+            cell,
+            out,
+        } => {
+            let sim = load(&case, &cli.libraries)?;
+            let sol = ferrotherm_core::flow::Checkpoint::read(&solution)?;
+            let (lo, hi) = match box_mm {
+                Some(b) => {
+                    let v = numbers(&b, "--box")?;
+                    if v.len() != 6 {
+                        bail!("--box needs six values: x0,y0,z0,x1,y1,z1");
+                    }
+                    ([v[0], v[1], v[2]], [v[3], v[4], v[5]])
+                }
+                None => {
+                    if around.is_empty() {
+                        bail!("give --around <block name> or --box");
+                    }
+                    let (mut lo, mut hi) =
+                        ferrotherm_core::submodel::box_of_blocks(&sim.case, &around)?;
+                    let mg = numbers(&margin, "--margin")?;
+                    let mg = match mg.len() {
+                        1 => [mg[0]; 6],
+                        6 => [mg[0], mg[1], mg[2], mg[3], mg[4], mg[5]],
+                        _ => bail!("--margin needs one value or six"),
+                    };
+                    for a in 0..3 {
+                        lo[a] = (lo[a] - mg[2 * a]).max(sim.case.domain.min[a]);
+                        hi[a] = (hi[a] + mg[2 * a + 1]).min(sim.case.domain.max[a]);
+                    }
+                    (lo, hi)
+                }
+            };
+            let (mut sub, info) = ferrotherm_core::submodel::submodel(&sim, &sol, lo, hi)?;
+            if let Some(c) = cell {
+                let v = numbers(&c, "--cell")?;
+                sub.grid.max_cell_mm = match v.len() {
+                    1 => ferrotherm_core::case::MaybeVec3::Vec3([v[0]; 3]),
+                    3 => ferrotherm_core::case::MaybeVec3::Vec3([v[0], v[1], v[2]]),
+                    _ => bail!("--cell needs one value or three"),
+                };
+                sub.grid.merge_mm = 0.0;
+            }
+            std::fs::write(&out, sub.to_toml()?)?;
+            eprintln!(
+                "sub-model {:?} … {:?} mm, {:.2} W, flow imposed in {:.3} / out {:.3} L/s, open face {}",
+                info.min,
+                info.max,
+                info.power_w,
+                info.flow_in_m3_s * 1e3,
+                info.flow_out_m3_s * 1e3,
+                info.open_face.map_or("none", |f| f.name())
+            );
+            for w in &info.warnings {
+                eprintln!("warning: {w}");
+            }
+            eprintln!("written to {}", out.display());
+        }
         Cmd::Run {
             case,
             out,
