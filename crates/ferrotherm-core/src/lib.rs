@@ -37,6 +37,7 @@ pub mod radiation;
 pub mod report;
 pub mod simulate;
 pub mod stencil;
+pub mod refine;
 pub mod submodel;
 pub mod vtk;
 
@@ -124,6 +125,15 @@ impl Simulation {
         &self,
         observer: &mut dyn FnMut(simulate::Event) -> bool,
     ) -> Result<Output> {
+        if self.has_flow()
+            && self
+                .case
+                .refinement
+                .as_ref()
+                .is_some_and(|r| !r.regions.is_empty())
+        {
+            return refine::run(self, observer);
+        }
         let result = if self.has_flow() {
             flow::run(
                 &self.model,
@@ -138,7 +148,7 @@ impl Simulation {
         Ok(self.finish(result))
     }
 
-    fn finish(&self, result: RunResult) -> Output {
+    pub(crate) fn finish(&self, result: RunResult) -> Output {
         let report = report::build(
             &self.model,
             &result,

@@ -120,6 +120,15 @@ is not corrected, so keep the box faces away from what you want to resolve
 (a few centimetres upstream and downstream of a heat sink) and include the
 board under the parts.
 
+**Local refinement (nested grids).** A `[refinement]` table in the case
+lists regions (around named blocks, or boxes) solved on finer grids of their
+own inside the same `ferrotherm run`, coupled both ways with the main grid:
+the fine temperatures go back into the main grid with its energy balance
+kept, and the fine velocities and pressures as a defect correction of its
+momentum equations, so a heat sink the main grid cannot resolve still sets
+its share of the flow. Blocks inside the regions are reported from the fine
+grids. See `docs/case-format.md`.
+
 `ferrotherm run` exits with code **2** when a component exceeds its Tj
 limit and with code **3** when the flow solution did not converge (2 wins when
 both apply; the warning is printed anyway), so it can
@@ -158,6 +167,8 @@ conduction) and [`examples/forced_air_chassis.toml`](examples/forced_air_chassis
 | Turbulent channel, k–ω SST with automatic wall treatment (same channel, wall cell from 0.25 to 4 mm, y⁺ ≈ 3 … 50) | Dean friction correlation, Gnielinski Nusselt number | C_f −3.6 / −4.8 / −10.5 %, Nu +5.1 / −0.9 / +0.9 % with 0.25 / 2 / 4 mm cells |
 | Laminar channel one cell wide between isothermal plates (g = 2 mm, L = 20 mm, Re ≈ 125) | Stephan's mean Nusselt number for developing flow (Muzychka & Yovanovich 2004) and the same channel with 8 cells across | one cell 0.2890 W, 8 cells 0.2934 W, correlation 0.2938 W of heat to the air (−1.6 %); still air between a hot and a cold plate across one cell: conduction exact (0.10518 W) |
 | Sub-model: heated block in a laminar duct on 4 mm cells, then a box around it on 1 mm cells with the coarse flow on its faces | Whole duct on 1 mm cells | block 68.8 °C (fine), 103.1 °C (coarse), **69.6 °C** (sub-model). Rack-tutorial heat sink in a duct, k–ε: 47.5 °C (fine), 53.4 °C (coarse), **48.0 °C** (sub-model, 96 k cells instead of 224 k) |
+| Local refinement, same duct: main grid 4 mm, region around the block on 1 mm cells, coupled both ways | Whole duct on 1 mm cells | block 68.8 °C (fine), 103.1 °C (main grid alone), **68.1 °C** (refined, 5 cycles); energy balance closed (imbalance below 0.001 %) |
+| Local refinement, two parallel channels, one with a fin array (1 mm fins and gaps, laminar): main grid one cell per gap, region with five | Uniform grid with five cells per gap | share of the flow through the fins 0.135 (fine), 0.172 (main grid alone), **0.142** (refined); fin 182.7 / 173.5 / **181.6 °C** |
 | Rack-tutorial heat sink alone in a duct (25 W chip, 18 fins 1 mm, gaps 1.9 mm, k–ε, 2 m/s) | Same case with 3 and 5 cells per fin gap | chip 68.6 °C with one cell per gap before the one-cell-channel model, 53.3 °C with it; 47.5 / 45.8 °C with 3 / 5 cells per gap |
 | k–ε, heated block in a duct (3D, conjugate) | Energy balance | imbalance < 0.01 % |
 | L-shaped board with a hole (polygon outline) | Exact area, power, export/re-import (STL, IDF with cut-out) | area 5900 mm² exact on a matching grid, all power in the board |

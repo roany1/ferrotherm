@@ -33,6 +33,42 @@ their centre.
 The grid always contains every block, component and boundary-region plane.
 PCB blocks get at least 4 cells through their thickness.
 
+## `[refinement]` — nested finer grids (optional, flow cases)
+
+Regions solved on a finer grid of their own, coupled both ways with the main
+grid: each region is solved with the main-grid flow and temperatures on its
+faces; the main grid takes back the fine temperatures (shape imposed, energy
+balance kept) and the fine velocities and pressures as a defect correction
+of its momentum equations, so the fine pressure drop changes the flow split
+around the region. The two are iterated until the block temperatures in the
+regions settle. Blocks, components and monitors entirely inside a region
+are reported from its fine grid (report section *Refined regions*).
+
+| Key | Default | Notes |
+|---|---|---|
+| `cycles` | 8 | Coupling cycles at most |
+| `coarse_iterations` | 60 | Main-grid iterations per cycle (the first solve uses `flow.max_iterations`) |
+| `fine_iterations` | 300 | Fine-grid iterations per cycle at most |
+| `tolerance_k` | 0.2 | Stop when no block temperature in a region changes more than this between cycles |
+
+`[[refinement.regions]]`:
+
+| Key | Notes |
+|---|---|
+| `name` | Shown in the report |
+| `around` | Box of the blocks whose names start with one of these prefixes … |
+| `margin_mm` | … grown by this margin: one value or −x −y −z +x +y +z |
+| `min`, `max` | … or an explicit box, mm |
+| `max_cell_mm` | Cell size inside the region (scalar or per axis) |
+| `min_cells_per_interval` | Optional, inside the region |
+
+Keep the faces of a region in plain air or in solids that are not hot spots,
+at least two main-grid cells away from what has to be resolved: the main-grid
+cells along the faces (the overlap) are not corrected. With a checkpoint
+(`ferrotherm run` writes `<case>.ftc`), each region's solution is saved as
+`<case>.region<k>.ftc` and a run restarted with `--restart <case>.ftc`
+resumes from the coupled state.
+
 ## `[environment]` (optional)
 
 | Key | Notes |

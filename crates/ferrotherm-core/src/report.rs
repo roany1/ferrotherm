@@ -94,6 +94,25 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow: Option<FlowSummary>,
     pub warnings: Vec<String>,
+    /// Regions solved on nested finer grids (their blocks, components and
+    /// monitors are reported from the fine grid).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refined: Vec<RefinedRegion>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RefinedRegion {
+    pub name: String,
+    pub min_mm: [f64; 3],
+    pub max_mm: [f64; 3],
+    pub cells: usize,
+    /// Coupling cycles done.
+    pub cycles: usize,
+    /// Largest change of a block temperature in the last cycle, K.
+    pub last_change_k: f64,
+    pub settled: bool,
+    pub fine_iterations: usize,
+    pub fine_converged: bool,
 }
 
 pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
@@ -251,6 +270,7 @@ pub fn build(m: &Model, r: &RunResult, title: &str, author: &str) -> Report {
                 .collect(),
         }),
         warnings: m.warnings.clone(),
+        refined: vec![],
     }
 }
 
@@ -282,6 +302,23 @@ impl Report {
         }
         if let Some(a) = self.ambient_c {
             s += &format!("Default ambient: {a:.1} °C\n\n");
+        }
+        if !self.refined.is_empty() {
+            s += "## Refined regions\n\nSolved on nested finer grids coupled both ways with the main grid; blocks, components and monitors inside them are reported from the fine grid.\n\n| Region | Box [mm] | Cells | Cycles | Last change [K] | Fine grid |\n|---|---|---:|---:|---:|---|\n";
+            for r in &self.refined {
+                s += &format!(
+                    "| {} | ({:.1}, {:.1}, {:.1}) … ({:.1}, {:.1}, {:.1}) | {} | {} | {:.3}{} | {} iterations{} |\n",
+                    r.name,
+                    r.min_mm[0], r.min_mm[1], r.min_mm[2], r.max_mm[0], r.max_mm[1], r.max_mm[2],
+                    r.cells,
+                    r.cycles,
+                    r.last_change_k,
+                    if r.settled { "" } else { " (not settled)" },
+                    r.fine_iterations,
+                    if r.fine_converged { ", converged" } else { ", not converged" },
+                );
+            }
+            s += "\n";
         }
         s += "## Energy balance\n\n";
         s += &format!(

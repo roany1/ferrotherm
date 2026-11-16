@@ -53,6 +53,70 @@ pub struct Case {
     /// tool); they extend or replace library entries with the same id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub materials: Vec<crate::library::Material>,
+    /// Regions solved on a finer grid, coupled both ways with the main grid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<Refinement>,
+}
+
+/// Local grid refinement by nested grids (see `refine`): each region is
+/// solved on its own finer grid with the flow and temperatures of the main
+/// grid on its faces, and the main grid is pulled towards the fine solution
+/// inside it; the two are iterated until the fine temperatures settle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Refinement {
+    /// Coupling cycles at most.
+    #[serde(default = "default_ref_cycles")]
+    pub cycles: usize,
+    /// Main-grid iterations per cycle (the first solve uses
+    /// `flow.max_iterations`).
+    #[serde(default = "default_ref_coarse")]
+    pub coarse_iterations: usize,
+    /// Fine-grid iterations per cycle at most.
+    #[serde(default = "default_ref_fine")]
+    pub fine_iterations: usize,
+    /// Stop when no block temperature in the regions changes by more than
+    /// this between cycles, K.
+    #[serde(default = "default_ref_tol")]
+    pub tolerance_k: f64,
+    pub regions: Vec<RefineRegion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefineRegion {
+    #[serde(default)]
+    pub name: String,
+    /// Box of the blocks whose names start with one of these, …
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub around: Vec<String>,
+    /// … grown by this margin (one value, or −x −y −z +x +y +z), mm …
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub margin_mm: Vec<f64>,
+    /// … or an explicit box, mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<[f64; 3]>,
+    /// Maximum cell size inside the region, mm.
+    pub max_cell_mm: MaybeVec3,
+    /// Minimum cells per geometry interval inside the region (default: that
+    /// of the main grid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_cells_per_interval: Option<usize>,
+}
+
+fn default_ref_cycles() -> usize {
+    8
+}
+fn default_ref_coarse() -> usize {
+    60
+}
+fn default_ref_fine() -> usize {
+    300
+}
+fn default_ref_tol() -> f64 {
+    0.2
 }
 
 // ------------------------------------------------------------------ flow

@@ -142,6 +142,9 @@ pub struct FlowResult {
     pub max_speed_m_s: f64,
     pub fluid: String,
     pub turbulence: String,
+    /// Final solution (for restarts and coupled solves); not serialised.
+    #[serde(skip)]
+    pub state: Option<Checkpoint>,
     /// Not converged: the flow fields were averaged over this many final
     /// iterations (the steady iteration oscillates, typically because the
     /// flow is physically unsteady). 0 when converged.
@@ -344,6 +347,40 @@ pub struct RunOptions {
     /// iterations (0: only at the end) and when the iteration stops.
     pub checkpoint: Option<std::path::PathBuf>,
     pub checkpoint_every: usize,
+    /// Values the solution is pulled towards (two-way coupling with finer
+    /// grids, see [`crate::refine`]).
+    pub nudge: Option<Nudge>,
+}
+
+/// Values of a finer solution handed to the main grid (two-way coupling).
+///
+/// Velocities and pressures enter as a defect correction (the τ-correction
+/// of full-approximation multigrid): the momentum equation of a listed face
+/// gets the constant source τ = A·u_f − b(p_f), the residual of the main-grid
+/// equation evaluated with the fine velocities and pressures. The fine
+/// solution is then a solution of the corrected main-grid equations there,
+/// and the fine pressure drop (e.g. of fins the main grid cannot resolve)
+/// reaches the main grid as a force, so that the flow split around the
+/// region can follow it.
+///
+/// Temperatures enter as a penalty `w·a_P·(T − T_target − offset)`, so the
+/// solution follows the target to within about 1/(1 + w).
+///
+/// Temperatures are pulled towards the target plus an offset per group,
+/// updated at every energy solve by a Newton step on the net heat the
+/// penalty adds to the group (the residual of the unpenalised equations
+/// summed over it), so that at convergence it adds none: the shape of the
+/// target is imposed, the energy balance is kept.
+#[derive(Debug, Clone, Default)]
+pub struct Nudge {
+    /// Penalty weight w relative to the diagonal.
+    pub weight: f64,
+    /// Temperature targets (cell index, °C, group).
+    pub t: Vec<(usize, f64, usize)>,
+    /// Fine velocities per axis (face index, m/s) for the τ-correction …
+    pub u: [Vec<(usize, f64)>; 3],
+    /// … with the fine pressures (cell index, Pa; any constant level).
+    pub p: Vec<(usize, f64)>,
 }
 
 /// State of the flow solution.
@@ -483,6 +520,13 @@ struct Solver<'a> {
     /// Those cells: (cell, axis across the channel, for each of the other
     /// two axes the extent [lo, hi] (m) of the run of channel cells).
     gaps: Vec<GapCell>,
+    /// Penalty weight and targets (NaN: none) of a nudge, see [`Nudge`].
+    nudge_w: f64,
+    nudge_t: Vec<f64>,
+    nudge_g: Vec<usize>,
+    nudge_off: std::sync::Mutex<Vec<f64>>,
+    /// τ-correction per face (empty: none).
+    tau: [Vec<f64>; 3],
 }
 
 impl<'a> Solver<'a> {
@@ -809,6 +853,11 @@ impl<'a> Solver<'a> {
             gap: vec![],
             gaps: vec![],
             sst: false,
+            nudge_w: 0.0,
+            nudge_t: vec![],
+            nudge_g: vec![],
+            nudge_off: Default::default(),
+            tau: Default::default(),
         };
         s.d_open = [
             vec![0.0; s.kind[0].len()],
@@ -2051,6 +2100,9 @@ impl<'a> Solver<'a> {
                 rhs += c * uold[f];
             }
             let ap = sum_anb + df.max(0.0) + ap_extra;
+            if !self.tau[a].is_empty() {
+                rhs += self.tau[a][f];
+            }
             let ap_r = ap / alpha;
             rhs += (ap_r - ap) * u[a][f];
             mat.ap[f] = ap_r;
@@ -2500,6 +2552,48 @@ impl<'a> Solver<'a> {
                 b[i] = st.t[i];
             }
         }
+        if !self.nudge_t.is_empty() {
+            let ng = self.nudge_g.iter().max().map_or(0, |g| g + 1);
+            // residual of the unpenalised equations summed per group, and the
+            // conductance of the group to the rest
+            let mut y = vec![0.0; m.nnodes];
+            mat.apply(&st.t, &mut y);
+            let strides = mat.strides();
+            let ingroup = |c: usize, g: usize| self.nudge_t[c].is_finite() && self.nudge_g[c] == g;
+            let mut rg = vec![0.0; ng];
+            let mut gg = vec![0.0; ng];
+            for (c, &tt) in self.nudge_t.iter().enumerate() {
+                if !tt.is_finite() {
+                    continue;
+                }
+                let g = self.nudge_g[c];
+                rg[g] += b[c] - y[c];
+                let mut inner = 0.0;
+                for a in 0..3 {
+                    let sa = strides[a];
+                    if mat.pos[a][c] != 0.0 && ingroup(c + sa, g) {
+                        inner += mat.pos[a][c];
+                    }
+                    if mat.neg[a][c] != 0.0 && c >= sa && ingroup(c - sa, g) {
+                        inner += mat.neg[a][c];
+                    }
+                }
+                gg[g] += mat.ap[c] - inner;
+            }
+            let mut off = self.nudge_off.lock().unwrap();
+            off.resize(ng, 0.0);
+            for g in 0..ng {
+                if gg[g] > 0.0 {
+                    off[g] += rg[g] / gg[g];
+                }
+            }
+            for (c, &tt) in self.nudge_t.iter().enumerate() {
+                if tt.is_finite() {
+                    b[c] += self.nudge_w * mat.ap[c] * (tt + off[self.nudge_g[c]]);
+                    mat.ap[c] *= 1.0 + self.nudge_w;
+                }
+            }
+        }
         if relax < 1.0 {
             for i in 0..m.nnodes {
                 let ap = mat.ap[i];
@@ -2720,6 +2814,60 @@ pub fn run(
                     st.u[a][f] = sv.fixed_u[a][f];
                 }
             }
+        }
+    }
+    if let Some(nd) = &opts.nudge {
+        sv.nudge_w = nd.weight;
+        if !nd.t.is_empty() {
+            sv.nudge_t = vec![f64::NAN; nc];
+            sv.nudge_g = vec![0; nc];
+            for &(c, t, g) in &nd.t {
+                if c < nc {
+                    sv.nudge_t[c] = t;
+                    sv.nudge_g[c] = g;
+                }
+            }
+        }
+        if nd.u.iter().any(|v| !v.is_empty()) {
+            // τ-correction from the fine velocities and pressures
+            let mut st2 = st.copy();
+            for &(c, p) in &nd.p {
+                if c < nc {
+                    st2.p[c] = p;
+                }
+            }
+            for &(c, t, _) in &nd.t {
+                if c < nc {
+                    st2.t[c] = t;
+                }
+            }
+            for a in 0..3 {
+                for &(f, u) in &nd.u[a] {
+                    if f < sv.kind[a].len() && sv.kind[a][f] == ACTIVE {
+                        st2.u[a][f] = u;
+                    }
+                }
+            }
+            if sv.cfg.turbulence == Turbulence::Lvel {
+                sv.update_nut(&mut st2);
+            }
+            let mut tau: [Vec<f64>; 3] = Default::default();
+            for a in 0..3 {
+                if nd.u[a].is_empty() {
+                    continue;
+                }
+                let (mat, b, _) = sv.momentum(&st2, a, None);
+                let mut y = vec![0.0; b.len()];
+                mat.apply(&st2.u[a], &mut y);
+                let mut t = vec![0.0; b.len()];
+                for &(f, _) in &nd.u[a] {
+                    if f < t.len() && sv.kind[a][f] == ACTIVE {
+                        t[f] = y[f] - b[f];
+                    }
+                }
+                tau[a] = t;
+            }
+            sv.tau = tau;
         }
     }
     let restarted = opts.restart.as_ref().map_or(0, |c| c.iterations);
@@ -3139,6 +3287,7 @@ pub fn run(
             },
             averaged_iterations: averaged,
             oscillation_k: oscillation,
+            state: Some(st.checkpoint(cells, restarted + iters)),
         }),
     })
 }

@@ -962,3 +962,171 @@ fn submodel_matches_fine_solution() {
     assert!((tz - tf).abs() < 0.5 * (tc - tf).abs());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Nested refinement: the duct of the sub-model test on 4 mm cells with a
+/// region around the block on 1 mm cells, coupled both ways. The block must
+/// come close to the whole duct on 1 mm cells.
+#[test]
+fn refinement_matches_fine_solution() {
+    let case = |cell: f64, refine: &str| {
+        format!(
+            r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [20, 80, 20]
+        material = "air"
+        [grid]
+        max_cell_mm = {cell}
+        [flow]
+        turbulence = "laminar"
+        gravity = [0, 0, 0]
+        max_iterations = 2000
+        tolerance = 1e-5
+        [[blocks]]
+        name = "floor"
+        material = "fr4"
+        min = [0, 0, 0]
+        max = [20, 80, 2]
+        [[blocks]]
+        name = "chip"
+        material = "al-6061-t6"
+        power_w = 0.5
+        min = [6, 22, 2]
+        max = [14, 30, 5]
+        [[boundaries]]
+        face = "ymin"
+        type = "inlet"
+        velocity_m_s = 1.0
+        t_ambient_c = 20
+        region = {{ min = [0, 2], max = [20, 20] }}
+        [[boundaries]]
+        face = "ymax"
+        type = "opening"
+        t_ambient_c = 20
+        region = {{ min = [0, 2], max = [20, 20] }}
+        {refine}
+        "#
+        )
+    };
+    let chip = |r: &Report| r.blocks.iter().find(|b| b.name == "chip").unwrap().t_avg_c;
+    let fine = sim(&case(1.0, "")).run(|_| {}).unwrap();
+    let coarse = sim(&case(4.0, "")).run(|_| {}).unwrap();
+    let refined = sim(&case(
+        4.0,
+        r#"
+        [refinement]
+        [[refinement.regions]]
+        around = ["chip"]
+        margin_mm = [4, 10, 2, 4, 14, 9]
+        max_cell_mm = 1.0
+        "#,
+    ))
+    .run(|_| {})
+    .unwrap();
+    let (tf, tc, tr) = (chip(&fine.report), chip(&coarse.report), chip(&refined.report));
+    let r = &refined.report.refined[0];
+    eprintln!(
+        "REFINE chip: fine {tf:.2} °C, coarse {tc:.2} °C, refined {tr:.2} °C ({} cycles, change {:.3} K, {} cells)",
+        r.cycles, r.last_change_k, r.cells
+    );
+    assert!(r.settled);
+    assert!((tr - tf).abs() < 0.1 * (tf - 20.0), "refined {tr} vs fine {tf}");
+    assert!((tr - tf).abs() < 0.5 * (tc - tf).abs());
+    eprintln!("REFINE imbalance {:.3} %", refined.report.energy_imbalance_pct);
+    assert!(refined.report.energy_imbalance_pct.abs() < 1.0);
+}
+
+/// Nested refinement, two-way: two parallel channels, one with a fin array
+/// (1 mm fins, 1 mm gaps) that the main grid resolves with one cell per gap
+/// and the region with five. The flow split between the channels depends
+/// on the fin pressure drop, so the main grid must take it back from the
+/// fine grid; split and fin temperature are compared with the uniform fine
+/// grid.
+#[test]
+fn refinement_two_way_flow_split() {
+    let case = |cx: f64, refine: &str| {
+        let mut fins = String::new();
+        for (k, x) in [1.0, 3.0, 5.0, 7.0].iter().enumerate() {
+            fins += &format!(
+                "[[blocks]]\nname = \"fin{k}\"\nmaterial = \"al-6061-t6\"\npower_w = 0.25\nmin = [{x}, 40, 0]\nmax = [{}, 60, 4]\n",
+                x + 1.0
+            );
+        }
+        format!(
+            r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [19, 100, 4]
+        material = "air"
+        [grid]
+        max_cell_mm = [{cx}, 2, 2]
+        [flow]
+        turbulence = "laminar"
+        gravity = [0, 0, 0]
+        max_iterations = 3000
+        tolerance = 1e-5
+        [[blocks]]
+        name = "divider"
+        material = "fr4"
+        min = [9, 10, 0]
+        max = [10, 90, 4]
+        {fins}
+        [[boundaries]]
+        face = "ymin"
+        type = "inlet"
+        velocity_m_s = 0.5
+        t_ambient_c = 20
+        [[boundaries]]
+        name = "outA"
+        face = "ymax"
+        type = "opening"
+        t_ambient_c = 20
+        region = {{ min = [0, 0], max = [9, 4] }}
+        [[boundaries]]
+        name = "outB"
+        face = "ymax"
+        type = "opening"
+        t_ambient_c = 20
+        region = {{ min = [10, 0], max = [19, 4] }}
+        [[boundaries]]
+        face = "zmin"
+        type = "symmetry"
+        [[boundaries]]
+        face = "zmax"
+        type = "symmetry"
+        {refine}
+        "#
+        )
+    };
+    let split = |o: &ferrotherm_core::Output| {
+        let f = o.result.flow.as_ref().unwrap();
+        let q = |n: &str| f.openings.iter().find(|x| x.name == n).unwrap().outflow_m3_s;
+        q("outA") / (q("outA") + q("outB"))
+    };
+    let fin = |r: &Report| r.blocks.iter().find(|b| b.name == "fin1").unwrap().t_max_c;
+    let fine = sim(&case(0.2, "")).run(|_| {}).unwrap();
+    let coarse = sim(&case(1.0, "")).run(|_| {}).unwrap();
+    let refined = sim(&case(
+        1.0,
+        r#"
+        [refinement]
+        [[refinement.regions]]
+        min = [0, 34, 0]
+        max = [19, 66, 4]
+        max_cell_mm = [0.2, 2, 2]
+        "#,
+    ))
+    .run(|_| {})
+    .unwrap();
+    let r = &refined.report.refined[0];
+    eprintln!(
+        "SPLIT channel A share: fine {:.4}, coarse {:.4}, refined {:.4}; fin1: fine {:.2}, coarse {:.2}, refined {:.2} °C ({} cycles, change {:.3} K, imbalance {:.2} %)",
+        split(&fine), split(&coarse), split(&refined),
+        fin(&fine.report), fin(&coarse.report), fin(&refined.report),
+        r.cycles, r.last_change_k, refined.report.energy_imbalance_pct
+    );
+    assert!(r.settled);
+    assert!((split(&refined) - split(&fine)).abs() < 0.5 * (split(&coarse) - split(&fine)).abs());
+    let (tf, tc, tr) = (fin(&fine.report), fin(&coarse.report), fin(&refined.report));
+    assert!((tr - tf).abs() < 0.5 * (tc - tf).abs(), "refined {tr} vs fine {tf}");
+}

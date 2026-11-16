@@ -20,7 +20,8 @@ Done and validated (see README → Verification):
   momentum and heat and buoyancy production, **k–ω SST with automatic wall
   treatment** (validated on the turbulent channel only), laminar.
 - Checkpoint/restart of steady flow solves; **sub-models** (zoom-in on a box
-  of a solved case with a finer grid, one-way).
+  of a solved case with a finer grid, one-way); **local refinement** by
+  nested finer grids coupled both ways.
 - Channels one cell wide (fin gaps on coarse grids): laminar parallel-plate
   shear and developing-flow heat transfer.
 - Fans (P–Q curve), vents, inlets, grilles/perforated plates, plate-fin
@@ -68,9 +69,13 @@ Done and validated (see README → Verification):
 
 ## Phase 3 — Grid
 
-- Local refinement around boards and components (nested Cartesian
-  regions or octree with hanging nodes), keeping the conservative face
-  fluxes.
+- Local refinement around boards and components: **nested grids coupled
+  both ways are in** (`[refinement]`: fine temperatures with the energy
+  balance kept, fine velocities and pressures as a τ-correction of the main
+  momentum equations; validated on the heated block and on a two-channel
+  flow split). Still to do: editing the regions in the GUI, solving the
+  regions in parallel, and an octree with hanging nodes if the overlap
+  coupling proves too slow on large models.
 - Grid report: aspect ratios, cells across gaps, warnings for gaps closed by
   the grid.
 - Validation: same results as a uniform fine grid at a fraction of the cells.

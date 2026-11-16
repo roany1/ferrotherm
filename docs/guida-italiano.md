@@ -479,6 +479,33 @@ griglia fine ovunque. L'accoppiamento è a senso unico: tenere le facce della
 scatola lontane da ciò che si vuole risolvere (qualche centimetro a monte e a
 valle di un dissipatore) e includere la scheda sotto i componenti.
 
+**Raffinamento locale (griglie annidate).** Invece di fare lo zoom a mano,
+si possono elencare nel caso delle regioni da risolvere con una griglia più
+fine, dentro lo stesso `ferrotherm run`:
+
+```toml
+[refinement]
+cycles = 6
+
+[[refinement.regions]]
+name = "dissipatore U1"
+around = ["HS1", "U1"]
+margin_mm = 15
+max_cell_mm = [1.5, 2.5, 0.6]
+```
+
+Ogni regione è risolta sulla sua griglia fine con il flusso e le temperature
+della griglia principale sulle facce; la griglia principale riprende le
+temperature fini (mantenendo il bilancio di energia) e le velocità e
+pressioni fini come correzione delle sue equazioni del moto, così la perdita
+di carico vera del dissipatore decide quanta aria ci passa. Si ripete finché
+le temperature nelle regioni non cambiano più di `tolerance_k`. Nel report i
+blocchi dentro le regioni vengono dalla griglia fine (sezione *Refined
+regions*). Le facce delle regioni vanno tenute in aria o in solidi non caldi,
+ad almeno due celle della griglia principale da ciò che si vuole risolvere.
+Con `--restart` il calcolo riparte anche dalle soluzioni fini salvate
+(`<caso>.region<k>.ftc`).
+
 `ferrotherm run` termina con codice **2** se un componente supera il suo
 limite di Tj e con codice **3** se il calcolo del flusso non è arrivato a
 convergenza: si può usare come controllo automatico. Un calcolo stazionario
