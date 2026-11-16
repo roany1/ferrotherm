@@ -76,8 +76,9 @@ Done and validated (see README → Verification):
 - Validation: same results as a uniform fine grid at a fraction of the cells.
 - Reference case: the Celsius "Full Enclosure" rack tutorial, where the
   uniform conforming grid leaves one cell per fin gap and the chips come out
-  about 20 K above Celsius (README → Verification). Done when its chips are
-  within a few kelvin of Celsius.
+  4–8 K above Celsius, while a sub-model with ≈ 3 cells per gap is within
+  about 1 K (README → Verification). Done when the chips of the whole rack
+  are within a few kelvin of Celsius without a sub-model.
 
 ## Phase 4 — Interoperability
 
