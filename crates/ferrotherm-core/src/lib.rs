@@ -55,6 +55,8 @@ pub struct Simulation {
     pub model: Model,
     /// Internal radiation (view factors), when `[radiation]` is enabled.
     pub s2s: Option<radiation::S2s>,
+    /// Restart and checkpoint files of the flow solve.
+    pub options: flow::RunOptions,
 }
 
 pub struct Output {
@@ -81,6 +83,7 @@ impl Simulation {
             library,
             model,
             s2s,
+            options: Default::default(),
         })
     }
 
@@ -121,7 +124,13 @@ impl Simulation {
         observer: &mut dyn FnMut(simulate::Event) -> bool,
     ) -> Result<Output> {
         let result = if self.has_flow() {
-            flow::run(&self.model, &self.case, self.s2s.as_ref(), observer)?
+            flow::run(
+                &self.model,
+                &self.case,
+                self.s2s.as_ref(),
+                &self.options,
+                observer,
+            )?
         } else {
             simulate::run_observed(&self.model, &self.case.solver, self.s2s.as_ref(), observer)?
         };

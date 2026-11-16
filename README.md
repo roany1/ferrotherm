@@ -97,9 +97,16 @@ $F defeature chassis.step simple.step --holes 8 --fillets 3 --small-parts 50
 $F export box.toml box.step                 # also .stl, .emn (IDF)
 $F check box.toml
 $F run box.toml -o results
+$F run box.toml -o results --restart results/box.ftc   # continue a flow solve
 $F materials | packages | finishes | environments | deratings
 $F pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
 ```
+
+A steady flow solve writes its solution to `<output>/<case>.ftc` every 25
+iterations (`--checkpoint-every`) and when it stops; `--restart` continues
+from it, so a long solve survives an interruption and a solve that stopped
+at `max_iterations` can go on. The checkpoint is valid only for the same
+geometry and grid.
 
 `ferrotherm run` exits with code **2** when a component exceeds its Tj
 limit and with code **3** when the flow solution did not converge (2 wins when

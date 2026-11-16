@@ -450,11 +450,18 @@ ferrotherm import meccanica.step --into box.toml --shape voxel:1 --material al-6
 ferrotherm import gerber.zip --into box.toml --origin 10,10,10
 ferrotherm check box.toml                          # verifica il modello e la griglia
 ferrotherm run box.toml -o risultati               # risolve e scrive i risultati
+ferrotherm run box.toml -o risultati --restart risultati/box.ftc   # riprende un calcolo
 ferrotherm defeature meccanica.step semplice.step --holes 8 --fillets 3
 ferrotherm export box.toml box.step                # anche .stl e .emn
 ferrotherm materials | packages | finishes | environments | deratings
 ferrotherm pcb --thickness 1.6 --layers 8 --oz 1 --coverage 0.6
 ```
+
+Un calcolo stazionario con flusso salva la soluzione in
+`<cartella>/<caso>.ftc` ogni 25 iterazioni (`--checkpoint-every`) e quando si
+ferma; con `--restart` riparte da lì. Così un calcolo lungo non si perde se
+viene interrotto, e uno fermato al numero massimo di iterazioni può
+proseguire. Il file vale solo per la stessa geometria e la stessa griglia.
 
 `ferrotherm run` termina con codice **2** se un componente supera il suo
 limite di Tj e con codice **3** se il calcolo del flusso non è arrivato a

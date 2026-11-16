@@ -239,6 +239,105 @@ struct Props {
     beta: f64,
 }
 
+/// Saved flow solution: written while a steady solve runs and read back to
+/// continue it (`ferrotherm run --restart`). Valid only for the same case
+/// geometry and grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checkpoint {
+    /// Grid cells along x, y, z.
+    pub cells: [usize; 3],
+    /// Outer iterations done when it was written.
+    pub iterations: usize,
+    /// Fields: u, v, w (faces), p, T (nodes), surface T, ν_t, k, ε or ω.
+    pub fields: Vec<Vec<f64>>,
+}
+
+const CHECKPOINT_MAGIC: &[u8; 8] = b"FTCHKPT1";
+
+impl Checkpoint {
+    /// Write atomically (temporary file, then rename).
+    pub fn write(&self, path: &std::path::Path) -> Result<()> {
+        use std::io::Write;
+        let io = |e| Error::Io {
+            path: path.display().to_string(),
+            source: e,
+        };
+        let tmp = path.with_extension("tmp");
+        {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp).map_err(io)?);
+            w.write_all(CHECKPOINT_MAGIC).map_err(io)?;
+            let mut head = self.cells.to_vec();
+            head.push(self.iterations);
+            head.push(self.fields.len());
+            for v in head {
+                w.write_all(&(v as u64).to_le_bytes()).map_err(io)?;
+            }
+            for f in &self.fields {
+                w.write_all(&(f.len() as u64).to_le_bytes()).map_err(io)?;
+                for x in f {
+                    w.write_all(&x.to_le_bytes()).map_err(io)?;
+                }
+            }
+            w.flush().map_err(io)?;
+        }
+        std::fs::rename(&tmp, path).map_err(io)
+    }
+
+    pub fn read(path: &std::path::Path) -> Result<Checkpoint> {
+        let data = std::fs::read(path).map_err(|e| Error::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        let bad = || {
+            Error::Invalid(format!(
+                "'{}' is not a FerroTherm checkpoint",
+                path.display()
+            ))
+        };
+        if data.len() < 8 || &data[..8] != CHECKPOINT_MAGIC {
+            return Err(bad());
+        }
+        let mut pos = 8;
+        let next = |pos: &mut usize| -> Result<u64> {
+            let b = data.get(*pos..*pos + 8).ok_or_else(bad)?;
+            *pos += 8;
+            Ok(u64::from_le_bytes(b.try_into().unwrap()))
+        };
+        let mut head = [0usize; 5];
+        for h in head.iter_mut() {
+            *h = next(&mut pos)? as usize;
+        }
+        let mut fields = Vec::new();
+        for _ in 0..head[4].min(64) {
+            let n = next(&mut pos)? as usize;
+            if n > (data.len() - pos) / 8 {
+                return Err(bad());
+            }
+            let mut f = Vec::with_capacity(n);
+            for _ in 0..n {
+                f.push(f64::from_bits(next(&mut pos)?));
+            }
+            fields.push(f);
+        }
+        Ok(Checkpoint {
+            cells: [head[0], head[1], head[2]],
+            iterations: head[3],
+            fields,
+        })
+    }
+}
+
+/// Restart and checkpoint options of a flow solve.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Start from this solution instead of the fluid at rest.
+    pub restart: Option<Checkpoint>,
+    /// Steady solves: write the solution here every `checkpoint_every`
+    /// iterations (0: only at the end) and when the iteration stops.
+    pub checkpoint: Option<std::path::PathBuf>,
+    pub checkpoint_every: usize,
+}
+
 /// State of the flow solution.
 struct State {
     u: [Vec<f64>; 3],
@@ -257,6 +356,62 @@ struct State {
 }
 
 impl State {
+    fn checkpoint(&self, cells: [usize; 3], iterations: usize) -> Checkpoint {
+        Checkpoint {
+            cells,
+            iterations,
+            fields: vec![
+                self.u[0].clone(),
+                self.u[1].clone(),
+                self.u[2].clone(),
+                self.p.clone(),
+                self.t.clone(),
+                self.ts.clone(),
+                self.nut.clone(),
+                self.k.clone(),
+                self.eps.clone(),
+            ],
+        }
+    }
+
+    /// Take the fields of a checkpoint written for the same grid.
+    fn restore(&mut self, cells: [usize; 3], c: &Checkpoint) -> Result<()> {
+        let mine = [
+            self.u[0].len(),
+            self.u[1].len(),
+            self.u[2].len(),
+            self.p.len(),
+            self.t.len(),
+            self.ts.len(),
+            self.nut.len(),
+            self.k.len(),
+            self.eps.len(),
+        ];
+        if c.cells != cells
+            || c.fields.len() != mine.len()
+            || c.fields.iter().zip(mine).any(|(f, n)| f.len() != n)
+        {
+            return Err(Error::Invalid(format!(
+                "the restart file is for another grid ({} × {} × {} cells, this case has {} × {} × {}): it can only continue the same case",
+                c.cells[0], c.cells[1], c.cells[2], cells[0], cells[1], cells[2]
+            )));
+        }
+        if c.fields.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(Error::Invalid(
+                "the restart file holds a diverged solution".into(),
+            ));
+        }
+        let f = &c.fields;
+        self.u = [f[0].clone(), f[1].clone(), f[2].clone()];
+        self.p = f[3].clone();
+        self.t = f[4].clone();
+        self.ts = f[5].clone();
+        self.nut = f[6].clone();
+        self.k = f[7].clone();
+        self.eps = f[8].clone();
+        Ok(())
+    }
+
     fn copy(&self) -> State {
         State {
             u: self.u.clone(),
@@ -2515,6 +2670,7 @@ pub fn run(
     m: &Model,
     case: &Case,
     s2s: Option<&S2s>,
+    opts: &RunOptions,
     observer: &mut dyn FnMut(Event) -> bool,
 ) -> Result<RunResult> {
     let start = std::time::Instant::now();
@@ -2542,6 +2698,25 @@ pub fn run(
             }
         }
     }
+    let cells = m.grid.n();
+    if let Some(c) = &opts.restart {
+        st.restore(cells, c)?;
+        // imposed velocities (inlets, walls) are those of the case
+        for a in 0..3 {
+            for f in 0..st.u[a].len() {
+                if sv.kind[a][f] != ACTIVE {
+                    st.u[a][f] = sv.fixed_u[a][f];
+                }
+            }
+        }
+    }
+    let restarted = opts.restart.as_ref().map_or(0, |c| c.iterations);
+    let save = |st: &State, it: usize| -> Result<()> {
+        match &opts.checkpoint {
+            Some(path) => st.checkpoint(cells, restarted + it).write(path),
+            None => Ok(()),
+        }
+    };
     let lvel = sv.cfg.turbulence == Turbulence::Lvel;
     let tol = sv.cfg.tolerance;
     let mut residuals: Vec<[f64; 3]> = Vec::new();
@@ -2733,6 +2908,9 @@ pub fn run(
                         .collect();
                     eprintln!("prof: it {it} key ranges {}", ranges.join(" "));
                 }
+                if opts.checkpoint_every > 0 && it % opts.checkpoint_every == 0 {
+                    save(&st, it)?;
+                }
                 if it >= 10 && r.iter().all(|x| *x < tol) {
                     converged = true;
                     break;
@@ -2748,6 +2926,7 @@ pub fn run(
                     ));
                 }
             }
+            save(&st, iters)?;
             if !converged && nsum > 1 {
                 // time-average of the oscillating iteration (continuity is
                 // linear, so the average stays mass-conserving)

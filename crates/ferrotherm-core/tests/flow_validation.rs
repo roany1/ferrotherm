@@ -715,6 +715,95 @@ fn plate_channel(cells_across: usize, inlet: bool, t_lo: f64, t_hi: f64) -> Repo
     out.report
 }
 
+/// A steady solve stopped early and continued from its checkpoint reaches
+/// the solution of the uninterrupted solve, in fewer iterations than from
+/// rest; a checkpoint of another grid is refused.
+#[test]
+fn restart_from_checkpoint() {
+    use ferrotherm_core::flow::Checkpoint;
+    let case = |dz: f64| {
+        format!(
+            r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [10, 20, 4]
+        material = "air"
+        [grid]
+        max_cell_mm = [10, 1.0, {dz}]
+        [flow]
+        turbulence = "laminar"
+        gravity = [0, 0, 0]
+        max_iterations = 3000
+        tolerance = 1e-6
+        relax_velocity = 0.5
+        relax_pressure = 0.5
+        [[blocks]]
+        name = "lo"
+        material = "al-6061-t6"
+        power_w = 0.3
+        min = [0, 0, 0]
+        max = [10, 20, 1]
+        [[boundaries]]
+        face = "xmin"
+        type = "symmetry"
+        [[boundaries]]
+        face = "xmax"
+        type = "symmetry"
+        [[boundaries]]
+        face = "ymin"
+        type = "inlet"
+        velocity_m_s = 0.5
+        t_ambient_c = 20
+        region = {{ min = [0, 1], max = [10, 4] }}
+        [[boundaries]]
+        face = "ymax"
+        type = "opening"
+        t_ambient_c = 20
+        region = {{ min = [0, 1], max = [10, 4] }}
+        "#
+        )
+    };
+    let dir = std::env::temp_dir().join(format!("ferrotherm-restart-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ckpt = dir.join("a.ftc");
+    let full = sim(&case(0.5)).run(|_| {}).unwrap();
+    let ff = full.result.flow.as_ref().unwrap();
+    assert!(ff.converged);
+    let t_full = full.report.blocks[0].t_max_c;
+
+    let mut part = sim(&case(0.5));
+    part.case.flow.as_mut().unwrap().max_iterations = 40;
+    part.options.checkpoint = Some(ckpt.clone());
+    part.options.checkpoint_every = 10;
+    let p = part.run(|_| {}).unwrap();
+    assert!(!p.result.flow.as_ref().unwrap().converged);
+    let saved = Checkpoint::read(&ckpt).unwrap();
+    assert_eq!(saved.iterations, 40);
+
+    let mut cont = sim(&case(0.5));
+    cont.options.restart = Some(saved.clone());
+    cont.options.checkpoint = Some(ckpt.clone());
+    let c = cont.run(|_| {}).unwrap();
+    let cf = c.result.flow.as_ref().unwrap();
+    assert!(cf.converged);
+    let t_cont = c.report.blocks[0].t_max_c;
+    eprintln!(
+        "RESTART full {} it {t_full:.4} °C; 40 + {} it {t_cont:.4} °C",
+        ff.iterations, cf.iterations
+    );
+    assert!((t_cont - t_full).abs() < 0.02, "{t_cont} vs {t_full}");
+    assert!(cf.iterations < ff.iterations);
+    assert_eq!(
+        Checkpoint::read(&ckpt).unwrap().iterations,
+        40 + cf.iterations
+    );
+
+    let mut other = sim(&case(1.0));
+    other.options.restart = Some(saved);
+    assert!(other.run(|_| {}).is_err());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn one_cell_channel_forced_convection() {
     let (g, w, l, u) = (0.002, 0.01, 0.02, 0.5);

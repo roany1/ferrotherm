@@ -36,6 +36,13 @@ enum Cmd {
         out: Option<PathBuf>,
         #[arg(short, long)]
         quiet: bool,
+        /// Continue a steady flow solve from the checkpoint of a previous run
+        /// of the same case (<output directory>/<case name>.ftc).
+        #[arg(long)]
+        restart: Option<PathBuf>,
+        /// Write the checkpoint every this many iterations (0: only at the end).
+        #[arg(long, default_value_t = 25)]
+        checkpoint_every: usize,
     },
     /// Validate a case and show the grid without solving.
     Check { case: PathBuf },
@@ -312,8 +319,35 @@ fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Run { case, out, quiet } => {
-            let sim = load(&case, &cli.libraries)?;
+        Cmd::Run {
+            case,
+            out,
+            quiet,
+            restart,
+            checkpoint_every,
+        } => {
+            let mut sim = load(&case, &cli.libraries)?;
+            let stem = case
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "case".into());
+            let dir = out.unwrap_or_else(|| case.with_file_name(format!("{stem}_results")));
+            if sim.has_flow() {
+                if let Some(r) = &restart {
+                    let c = ferrotherm_core::flow::Checkpoint::read(r)?;
+                    if !quiet {
+                        eprintln!(
+                            "continuing from {} ({} iterations done)",
+                            r.display(),
+                            c.iterations
+                        );
+                    }
+                    sim.options.restart = Some(c);
+                }
+                std::fs::create_dir_all(&dir)?;
+                sim.options.checkpoint = Some(dir.join(format!("{stem}.ftc")));
+                sim.options.checkpoint_every = checkpoint_every;
+            }
             let n = sim.model.grid.n();
             if !quiet {
                 eprintln!(
@@ -335,11 +369,6 @@ fn main() -> Result<()> {
                     eprintln!("  {m}");
                 }
             })?;
-            let stem = case
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "case".into());
-            let dir = out.unwrap_or_else(|| case.with_file_name(format!("{stem}_results")));
             ferrotherm_core::export::write_results(
                 &dir,
                 &stem,
