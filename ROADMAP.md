@@ -82,8 +82,10 @@ Done and validated (see README → Verification):
 - Reference case: the Celsius "Full Enclosure" rack tutorial, where the
   uniform conforming grid leaves one cell per fin gap and the chips come out
   4–8 K above Celsius, while a sub-model with ≈ 3 cells per gap is within
-  about 1 K (README → Verification). Done when the chips of the whole rack
-  are within a few kelvin of Celsius without a sub-model.
+  about 1 K (README → Verification). With 16 refined regions the whole rack
+  gives 43.6–47.0 °C against 43.8–45.3 °C (12 of 16 chips within 0.5 K);
+  left: a fully settled run, and the fan operating point (0.045 m³/s at
+  ≈ 100 Pa against 0.048 m³/s at 72 Pa).
 
 ## Phase 4 — Interoperability
 
