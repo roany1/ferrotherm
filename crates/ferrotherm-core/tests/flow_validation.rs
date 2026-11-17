@@ -214,7 +214,8 @@ fn forced_convection_energy_balance() {
 /// a total-pressure curve drops the ½ρ(Q/A)² on the left. ζ_exit = 0.01
 /// (solver floor).
 fn fan_operating_point(curve_pressure: &str, dynamic: f64) {
-    let s = sim(&format!(r#"
+    let s = sim(&format!(
+        r#"
         [domain]
         min = [0, 0, 0]
         max = [300, 50, 50]
@@ -259,7 +260,8 @@ fn fan_operating_point(curve_pressure: &str, dynamic: f64) {
         [[boundaries]]
         face = "zmax"
         type = "symmetry"
-    "#));
+    "#
+    ));
     let out = s.run(|_| {}).unwrap();
     let f = out.result.flow.as_ref().unwrap();
     assert!(f.converged, "{:?}", f.residuals.last());
@@ -1023,16 +1025,26 @@ fn refinement_matches_fine_solution() {
     ))
     .run(|_| {})
     .unwrap();
-    let (tf, tc, tr) = (chip(&fine.report), chip(&coarse.report), chip(&refined.report));
+    let (tf, tc, tr) = (
+        chip(&fine.report),
+        chip(&coarse.report),
+        chip(&refined.report),
+    );
     let r = &refined.report.refined[0];
     eprintln!(
         "REFINE chip: fine {tf:.2} °C, coarse {tc:.2} °C, refined {tr:.2} °C ({} cycles, change {:.3} K, {} cells)",
         r.cycles, r.last_change_k, r.cells
     );
     assert!(r.settled);
-    assert!((tr - tf).abs() < 0.1 * (tf - 20.0), "refined {tr} vs fine {tf}");
+    assert!(
+        (tr - tf).abs() < 0.1 * (tf - 20.0),
+        "refined {tr} vs fine {tf}"
+    );
     assert!((tr - tf).abs() < 0.5 * (tc - tf).abs());
-    eprintln!("REFINE imbalance {:.3} %", refined.report.energy_imbalance_pct);
+    eprintln!(
+        "REFINE imbalance {:.3} %",
+        refined.report.energy_imbalance_pct
+    );
     assert!(refined.report.energy_imbalance_pct.abs() < 1.0);
 }
 
@@ -1100,7 +1112,13 @@ fn refinement_two_way_flow_split() {
     };
     let split = |o: &ferrotherm_core::Output| {
         let f = o.result.flow.as_ref().unwrap();
-        let q = |n: &str| f.openings.iter().find(|x| x.name == n).unwrap().outflow_m3_s;
+        let q = |n: &str| {
+            f.openings
+                .iter()
+                .find(|x| x.name == n)
+                .unwrap()
+                .outflow_m3_s
+        };
         q("outA") / (q("outA") + q("outB"))
     };
     let fin = |r: &Report| r.blocks.iter().find(|b| b.name == "fin1").unwrap().t_max_c;
@@ -1128,5 +1146,8 @@ fn refinement_two_way_flow_split() {
     assert!(r.settled);
     assert!((split(&refined) - split(&fine)).abs() < 0.5 * (split(&coarse) - split(&fine)).abs());
     let (tf, tc, tr) = (fin(&fine.report), fin(&coarse.report), fin(&refined.report));
-    assert!((tr - tf).abs() < 0.5 * (tc - tf).abs(), "refined {tr} vs fine {tf}");
+    assert!(
+        (tr - tf).abs() < 0.5 * (tc - tf).abs(),
+        "refined {tr} vs fine {tf}"
+    );
 }

@@ -116,7 +116,11 @@ fn cell_ranges(g: &Grid, bmin: [f64; 3], bmax: [f64; 3]) -> ([usize; 3], [usize;
             .position(|&x| x >= bmax[a] * MM - 1e-9)
             .unwrap_or(n[a]);
         lo[a] = if i0 == 0 { 0 } else { i0 + 1 };
-        hi[a] = if i1 == n[a] { n[a] } else { i1.saturating_sub(1) };
+        hi[a] = if i1 == n[a] {
+            n[a]
+        } else {
+            i1.saturating_sub(1)
+        };
         if hi[a] < lo[a] {
             hi[a] = lo[a];
         }
@@ -224,6 +228,16 @@ fn restrict(
     }
 }
 
+/// Progress saved next to the checkpoint so that a restarted run keeps its
+/// cycle count and can measure the change of its first cycle.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Progress {
+    /// Cycle (0-based) in progress when saved.
+    cycle: usize,
+    /// Per region: block → max temperature of its last solve.
+    prev: Vec<Vec<(String, f64)>>,
+}
+
 struct Fine {
     name: String,
     min: [f64; 3],
@@ -296,8 +310,14 @@ pub fn run(sim: &Simulation, observer: &mut dyn FnMut(Event) -> bool) -> Result<
             .as_ref()
             .map(|p| p.with_extension(format!("region{}.ftc", k + 1)))
     };
+    let progress_path = sim
+        .options
+        .checkpoint
+        .as_ref()
+        .map(|p| p.with_extension("refine.json"));
     let mut coarse_state = sim.options.restart.clone();
     let mut nudge: Option<Nudge> = None;
+    let mut first_cycle = 0;
     // restart: fine solutions saved by an earlier run
     if let Some(cs) = &coarse_state {
         let mut nd = Nudge {
@@ -307,7 +327,9 @@ pub fn run(sim: &Simulation, observer: &mut dyn FnMut(Event) -> bool) -> Result<
         let mut any = false;
         for (gi, (fine, r)) in fines.iter_mut().zip(&cfg.regions).enumerate() {
             let Some(path) = fine_path(gi) else { continue };
-            let Ok(st) = Checkpoint::read(&path) else { continue };
+            let Ok(st) = Checkpoint::read(&path) else {
+                continue;
+            };
             let (fsim, info) = fine_sim(sim, cs, fine, r, cfg.fine_iterations)?;
             if st.cells != fsim.model.grid.n() {
                 continue;
@@ -319,6 +341,19 @@ pub fn run(sim: &Simulation, observer: &mut dyn FnMut(Event) -> bool) -> Result<
         }
         if any {
             nudge = Some(nd);
+            // cycle count and block temperatures of the earlier run
+            if let Some(pr) = progress_path
+                .as_ref()
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|b| serde_json::from_slice::<Progress>(&b).ok())
+            {
+                if pr.prev.len() == fines.len() {
+                    first_cycle = pr.cycle.min(cfg.cycles.max(1) - 1);
+                    for (f, p) in fines.iter_mut().zip(pr.prev) {
+                        f.prev = p;
+                    }
+                }
+            }
         }
     }
     let mut coarse_out: Option<Output> = None;
@@ -331,7 +366,7 @@ pub fn run(sim: &Simulation, observer: &mut dyn FnMut(Event) -> bool) -> Result<
             Err(Error::Cancelled)
         }
     };
-    for cycle in 0..cfg.cycles.max(1) {
+    for cycle in first_cycle..cfg.cycles.max(1) {
         cycles = cycle + 1;
         // ---- main grid ----
         msg(
@@ -365,6 +400,7 @@ pub fn run(sim: &Simulation, observer: &mut dyn FnMut(Event) -> bool) -> Result<
             ..Default::default()
         };
         let mut worst: f64 = 0.0;
+        let mut prevs: Vec<Vec<(String, f64)>> = fines.iter().map(|f| f.prev.clone()).collect();
         for (gi, (fine, r)) in fines.iter_mut().zip(&cfg.regions).enumerate() {
             let (mut fsim, info) = fine_sim(sim, &cstate, fine, r, cfg.fine_iterations)?;
             fine.cells = fsim.model.ncells;
@@ -416,6 +452,15 @@ pub fn run(sim: &Simulation, observer: &mut dyn FnMut(Event) -> bool) -> Result<
             };
             worst = worst.max(fine.change);
             fine.prev = now;
+            prevs[gi] = fine.prev.clone();
+            if let Some(path) = &progress_path {
+                let pr = Progress {
+                    cycle,
+                    prev: prevs.clone(),
+                };
+                // best effort: losing it only costs one extra cycle on restart
+                let _ = std::fs::write(path, serde_json::to_vec(&pr).unwrap_or_default());
+            }
             fine.min = info.min;
             fine.max = info.max;
             fine.state = Some(fstate);
@@ -441,8 +486,9 @@ fn merge(case: &Case, out: &mut Output, fines: &[Fine], cycles: usize, settled: 
     let rep = &mut out.report;
     for f in fines {
         let Some(fo) = &f.out else { continue };
-        let inside_box =
-            |lo: &[f64; 3], hi: &[f64; 3]| (0..3).all(|a| lo[a] >= f.min[a] - 1e-6 && hi[a] <= f.max[a] + 1e-6);
+        let inside_box = |lo: &[f64; 3], hi: &[f64; 3]| {
+            (0..3).all(|a| lo[a] >= f.min[a] - 1e-6 && hi[a] <= f.max[a] + 1e-6)
+        };
         for b in &fo.report.blocks {
             let whole = case
                 .blocks

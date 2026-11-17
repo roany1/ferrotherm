@@ -34,10 +34,10 @@ pub mod mg;
 pub mod model;
 pub mod pcb;
 pub mod radiation;
+pub mod refine;
 pub mod report;
 pub mod simulate;
 pub mod stencil;
-pub mod refine;
 pub mod submodel;
 pub mod vtk;
 

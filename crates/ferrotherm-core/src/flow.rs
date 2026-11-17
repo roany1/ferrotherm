@@ -25,7 +25,9 @@
 //!   log-law shear and heat transfer.
 //! * Energy: conduction everywhere + advection in the fluid, k_eff = k + ρ c_p ν_t / Pr_t.
 
-use crate::case::{BoundaryKind, Case, CurvePressure, Face, FlowSettings, Mode, Scheme, Turbulence};
+use crate::case::{
+    BoundaryKind, Case, CurvePressure, Face, FlowSettings, Mode, Scheme, Turbulence,
+};
 use crate::error::{Error, Result};
 use crate::library::interp;
 use crate::model::{axis_of, conductances, direction_of, fan_extent, tangential, Model};

@@ -66,8 +66,9 @@ Keep the faces of a region in plain air or in solids that are not hot spots,
 at least two main-grid cells away from what has to be resolved: the main-grid
 cells along the faces (the overlap) are not corrected. With a checkpoint
 (`ferrotherm run` writes `<case>.ftc`), each region's solution is saved as
-`<case>.region<k>.ftc` and a run restarted with `--restart <case>.ftc`
-resumes from the coupled state.
+`<case>.region<k>.ftc`, with the cycle count and last block temperatures in
+`<case>.refine.json`; a run restarted with `--restart <case>.ftc` resumes from
+the coupled state at the cycle where it stopped.
 
 ## `[environment]` (optional)
 

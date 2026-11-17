@@ -504,7 +504,7 @@ blocchi dentro le regioni vengono dalla griglia fine (sezione *Refined
 regions*). Le facce delle regioni vanno tenute in aria o in solidi non caldi,
 ad almeno due celle della griglia principale da ciò che si vuole risolvere.
 Con `--restart` il calcolo riparte anche dalle soluzioni fini salvate
-(`<caso>.region<k>.ftc`).
+(`<caso>.region<k>.ftc`) e dal ciclo a cui si era fermato (`<caso>.refine.json`).
 
 `ferrotherm run` termina con codice **2** se un componente supera il suo
 limite di Tj e con codice **3** se il calcolo del flusso non è arrivato a
