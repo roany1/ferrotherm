@@ -210,6 +210,9 @@ struct FanDef {
     dynamic: f64,
     /// Linearisation (P0, slope, Q0) of the pressure jump.
     lin: (f64, f64, f64),
+    /// Mean dynamic pressure of the air arriving at an interior fan with a
+    /// static-pressure curve (NaN before the first iteration), Pa.
+    ke: f64,
 }
 
 impl FanDef {
@@ -694,22 +697,31 @@ impl<'a> Solver<'a> {
                 for u in 0..n[t[0]] {
                     let cu = g.center(t[0], u) / MM - f.center[t[0]];
                     let cv = g.center(t[1], v) / MM - f.center[t[1]];
-                    let inside = match f.diameter {
+                    let (inside, in_hub) = match f.diameter {
                         Some(dm) if f.size.is_none() => {
                             let r2 = cu * cu + cv * cv;
                             let hub = f.hub_diameter.unwrap_or(0.0);
-                            r2 < 0.25 * dm * dm && r2 >= 0.25 * hub * hub
+                            let in_hub = r2 < 0.25 * hub * hub;
+                            (r2 < 0.25 * dm * dm && !in_hub, in_hub)
                         }
-                        _ => cu.abs() < 0.5 * size[0] && cv.abs() < 0.5 * size[1],
+                        _ => (cu.abs() < 0.5 * size[0] && cv.abs() < 0.5 * size[1], false),
                     };
-                    if !inside {
-                        continue;
-                    }
                     let mut p = [0usize; 3];
                     p[a] = i;
                     p[t[0]] = u;
                     p[t[1]] = v;
                     let fi = fidx(fd[a], p);
+                    if in_hub {
+                        // the hub is closed: air must not flow back through it
+                        // (a hub block of another shape may leave fluid there)
+                        if kind[a][fi] == ACTIVE || kind[a][fi] == OPENING {
+                            kind[a][fi] = WALL;
+                        }
+                        continue;
+                    }
+                    if !inside {
+                        continue;
+                    }
                     let boundary = i == 0 || i == n[a];
                     if boundary {
                         // a fan in the domain wall is an opening with a pressure rise
@@ -768,6 +780,7 @@ impl<'a> Solver<'a> {
                     CurvePressure::Total => 0.0,
                 },
                 lin: (f.curve.first().map(|r| r[1]).unwrap_or(0.0), 0.0, 0.0),
+                ke: f64::NAN,
             });
         }
 
@@ -783,6 +796,8 @@ impl<'a> Solver<'a> {
             let i = g.plane_index(a, r.center[a] * MM);
             let t = tangential(a);
             let (lin, quad) = r.loss.coefficients(props.rho, props.mu);
+            // free_area = 0: a thin wall (baffle) on the plane
+            let closed = r.loss.free_area == Some(0.0);
             let mut count = 0;
             for v in 0..n[t[1]] {
                 for u in 0..n[t[0]] {
@@ -794,7 +809,10 @@ impl<'a> Solver<'a> {
                         p[t[0]] = u;
                         p[t[1]] = v;
                         let fi = fidx(fd[a], p);
-                        if kind[a][fi] == ACTIVE {
+                        if kind[a][fi] == ACTIVE && closed {
+                            kind[a][fi] = WALL;
+                            count += 1;
+                        } else if kind[a][fi] == ACTIVE {
                             res_lin[a][fi] += lin;
                             res_quad[a][fi] += quad;
                             count += 1;
@@ -802,7 +820,7 @@ impl<'a> Solver<'a> {
                     }
                 }
             }
-            if count == 0 {
+            if count == 0 && !closed {
                 return Err(Error::Invalid(format!(
                     "resistance '{}' has no free flow faces (must lie inside the air, not on the domain boundary)",
                     r.name
@@ -1903,6 +1921,33 @@ impl<'a> Solver<'a> {
 
     /// Update the linearisation of every curve fan from the current flow.
     fn update_fans(&mut self, st: &State) {
+        let rho = self.props.rho;
+        for fi in 0..self.fans.len() {
+            let fan = &self.fans[fi];
+            if fan.dynamic <= 0.0 || fan.boundary {
+                continue;
+            }
+            // area-weighted dynamic pressure in the cells just upstream
+            let a = fan.axis;
+            let (mut sum, mut w) = (0.0, 0.0);
+            for &f in &fan.faces {
+                let mut p = fijk(self.fd[a], f);
+                if fan.dir > 0.0 {
+                    p[a] -= 1;
+                }
+                let v = self.cell_velocity(st, self.cell(p));
+                let ar = face_area(self.m, self.fd[a], a, f);
+                sum += 0.5 * rho * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) * ar;
+                w += ar;
+            }
+            let ke = sum / w.max(1e-30);
+            let fan = &mut self.fans[fi];
+            fan.ke = if fan.ke.is_nan() {
+                ke
+            } else {
+                fan.ke + 0.3 * (ke - fan.ke)
+            };
+        }
         for fan in self.fans.iter_mut() {
             if fan.fixed.is_some() {
                 continue;
@@ -1956,6 +2001,35 @@ impl<'a> Solver<'a> {
             let t = tangential(a);
             let area = g.width(t[0], p[t[0]]) * g.width(t[1], p[t[1]]);
             let vol = la * area;
+            let fi = self.face_fan[a][f];
+            if fi >= 0 {
+                // Fan plane: the face imposes the pressure jump of the curve
+                // between its two cells, like a fan in an opening. The
+                // momentum balance of the face (acceleration of the air into
+                // the fan, inlet contraction) is already in the measured
+                // curve, so it is not solved again here.
+                let fan = &self.fans[fi as usize];
+                let (p0, s, q0) = fan.lin;
+                let mut src = p0 - s * q0;
+                if fan.dynamic > 0.0 && !fan.ke.is_nan() {
+                    // static-pressure curve = static out − total in: the
+                    // jump adds the dynamic pressure of the air arriving at
+                    // the fan instead of the mean ½ρ(Q/A)²
+                    src += fan.ke - fan.dynamic * q0 * q0.abs();
+                }
+                let r = 0.01 * rho * u[a][f].abs().max(0.05) - s * fan.area;
+                // damping (deferred, zero once converged)
+                let rd = rho * u[a][f].abs().max(0.05);
+                let ap = (r + rd) * area;
+                let mut rhs =
+                    (st.p[cl] - st.p[ch]) * area + fan.dir * area * src + rd * area * u[a][f];
+                let ap_r = ap / alpha;
+                rhs += (ap_r - ap) * u[a][f];
+                mat.ap[f] = ap_r;
+                b[f] = rhs;
+                d[f] = area / ap_r;
+                continue;
+            }
             let mut sum_anb = 0.0;
             let mut df = 0.0;
             let mut ap_extra = 0.0;
@@ -2086,14 +2160,6 @@ impl<'a> Solver<'a> {
             // planar resistance
             if self.res_lin[a][f] != 0.0 || self.res_quad[a][f] != 0.0 {
                 ap_extra += (self.res_lin[a][f] + self.res_quad[a][f] * u[a][f].abs()) * area;
-            }
-            // fan (curve)
-            let fi = self.face_fan[a][f];
-            if fi >= 0 {
-                let fan = &self.fans[fi as usize];
-                let (p0, s, q0) = fan.lin;
-                rhs += fan.dir * area * (p0 - s * q0);
-                ap_extra += -s * area * fan.area;
             }
             // transient
             if let Some((uold, dt)) = prev_u {

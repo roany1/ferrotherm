@@ -203,10 +203,20 @@ with a low continuity residual (reported as "temperatures settled").
 | `size` | `[a, b]` rectangular face in the two in-plane axes |
 | `curve` | `[[Q m³/s, Δp Pa], ...]` with increasing Q (datasheet curve) — **or** — |
 | `flow_m3_s` | Fixed volume flow |
-| `curve_pressure` | `"static"` (default: datasheet static pressure, the solver adds the outlet dynamic pressure ½ρ(Q/A)² over the free fan area, A = annulus between hub and diameter) or `"total"` (the curve is the total pressure rise) |
+| `curve_pressure` | `"static"` (default: datasheet static pressure = static pressure out − total pressure in, as on a fan test rig) or `"total"` (the curve is the total pressure rise) |
 
 A fan on the domain boundary draws from (or blows to) the ambient; inside
-the domain it is a pressure-jump plane. 1 CFM = 4.7195e-4 m³/s.
+the domain it is a plane that imposes the pressure jump of the curve between
+its two cells. With a static-pressure curve the jump is the curve plus the
+dynamic pressure of the air arriving at the fan (mean over the fan face of
+the cells just upstream); on the boundary, the dynamic pressure ½ρ(Q/A)² over
+the free fan area (annulus between hub and diameter). The hub (inside
+`hub_diameter`) is closed. 1 CFM = 4.7195e-4 m³/s.
+
+A fan in a housing as wide as its bore (an 80 mm fan in an 80 × 80 mm
+frame) leaves no frame on the grid at the middle of each side: close the
+housing sides with thin walls (`[[resistances]]` with `free_area = 0`), or
+part of the air goes back around the fan. The Celsius import does this.
 
 ## `[[resistances]]` — grilles, perforated plates, filters
 
@@ -216,6 +226,9 @@ the domain it is a pressure-jump plane. 1 CFM = 4.7195e-4 m³/s.
 | `axis` | Normal of the plane: `x`, `y`, `z` |
 | `size` | `[a, b]` in the two in-plane axes (increasing axis order) |
 | `loss` | `{ zeta = 4.0, free_area = 0.5, hole_diameter_mm = 3 }` |
+
+`loss = { free_area = 0.0 }` makes the rectangle a thin wall (baffle): no
+flow through it, no grid lines at its edges.
 
 Δp = ½ρζu² on the approach velocity u, plus the laminar thin-plate term
 30/(f²·Re) when `free_area` and `hole_diameter_mm` are given (Idelchik, as

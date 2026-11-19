@@ -395,6 +395,7 @@ fn fan(
     // housing: a square frame of the overall size, from the wall to the fan
     // plane, with the circular bore open, so the air pushed by the fan
     // cannot flow back around it (Celsius fans are square-housed)
+    let mut housing_box = None;
     if housing >= dia && th > wall_t + 1e-6 {
         let p = outer + s_in * wall_t;
         let (z0, z1) = (p.min(plane), p.max(plane));
@@ -412,6 +413,7 @@ fn fan(
                 q
             })
             .collect();
+        housing_box = Some(ft_box(ctx, pose, &[lo, hi]));
         ctx.block_holes(
             pose,
             &format!("{name}/housing"),
@@ -452,6 +454,33 @@ fn fan(
     let (fa, fs) = ft_axis(ca, sg * dir_local);
     let center = ctx.f.p(pose.apply(point(axis, plane, o1, o2)));
     let fname = ctx.unique(&name);
+    // thin walls on the four sides of the housing: when the bore is as wide
+    // as the housing the frame vanishes on the grid at the middle of each
+    // side, and the fan would blow part of its air back around itself
+    if let Some((ga, gb)) = housing_box {
+        for t in (0..3).filter(|&k| k != fa) {
+            let o = 3 - fa - t;
+            let (u, v) = (t.min(o), t.max(o));
+            for side in [ga[t], gb[t]] {
+                let mut c = [0.0; 3];
+                for k in 0..3 {
+                    c[k] = 0.5 * (ga[k] + gb[k]);
+                }
+                c[t] = side;
+                ctx.case.resistances.push(Resistance {
+                    name: format!("{fname}/housing side"),
+                    center: c,
+                    axis: AXIS_NAME[t].into(),
+                    size: [gb[u] - ga[u], gb[v] - ga[v]],
+                    loss: Loss {
+                        zeta: 0.0,
+                        free_area: Some(0.0),
+                        hole_diameter_mm: None,
+                    },
+                });
+            }
+        }
+    }
     let on = txt(n, "Status/Fan_Status").is_none_or(|s| !s.eq_ignore_ascii_case("Off"));
     if on {
         let (curve, flow) = fan_flow(n);

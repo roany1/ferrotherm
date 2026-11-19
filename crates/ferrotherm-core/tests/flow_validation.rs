@@ -288,6 +288,116 @@ fn fan_operating_point_total_curve() {
     fan_operating_point("total", 0.0);
 }
 
+/// 80 mm fan (41 mm hub) at the inner face of a square 80 × 80 mm housing,
+/// 38 mm deep, blowing out of a plenum of 160 × 160 mm fed through an inlet
+/// grille (ζ = 40): the arrangement of a fan-curve test with free outlet, so
+/// the fan must sit on its static-pressure curve, P_s(Q) = −p_total(plenum)
+/// = ½ρ(1 + ζ)(Q/A_inlet)². The housing walls are thin walls (`free_area =
+/// 0`): the bore is as wide as the housing, so without them the frame
+/// vanishes on the grid and part of the air goes back around the fan.
+#[test]
+fn fan_in_housing_free_outlet() {
+    let ring: Vec<String> = (0..48)
+        .map(|k| {
+            let a = 2.0 * std::f64::consts::PI * k as f64 / 48.0;
+            format!(
+                "[{:.4}, {:.4}]",
+                80.0 + 40.0 * a.cos(),
+                80.0 + 40.0 * a.sin()
+            )
+        })
+        .collect();
+    let h = 41.0 * std::f64::consts::PI.sqrt() / 4.0;
+    let mut toml = format!(
+        r#"
+        [domain]
+        min = [0, 0, 0]
+        max = [160, 300, 160]
+        material = "air"
+        [grid]
+        max_cell_mm = [4, 13, 4]
+        [flow]
+        turbulence = "k_epsilon"
+        gravity = [0, 0, 0]
+        max_iterations = 1500
+        tolerance = 1e-4
+        [[fans]]
+        name = "fan"
+        center = [80, 262, 80]
+        direction = "+y"
+        diameter = 80
+        hub_diameter = 41
+        curve = [[0.0, 364.93], [0.0125179, 239.7912], [0.027398, 156.7971], [0.0431624, 121.6766], [0.0547473, 0.0]]
+        [[blocks]]
+        name = "housing"
+        material = "al-6061-t6"
+        min = [40, 262, 40]
+        max = [120, 300, 120]
+        outline_axis = "y"
+        outline = [[{}], [[40, 40], [120, 40], [120, 120], [40, 120]]]
+        [[blocks]]
+        name = "hub"
+        material = "al-6061-t6"
+        min = [{lo}, 262, {lo}]
+        max = [{hi}, 300, {hi}]
+        [[boundaries]]
+        name = "inlet"
+        face = "ymin"
+        type = "opening"
+        t_ambient_c = 20
+        loss = {{ zeta = 40.0 }}
+        [[boundaries]]
+        name = "outlet"
+        face = "ymax"
+        type = "opening"
+        t_ambient_c = 20
+        region = {{ min = [40, 40], max = [120, 120] }}
+        "#,
+        ring.join(", "),
+        lo = 80.0 - h,
+        hi = 80.0 + h,
+    );
+    for (c, ax, sz) in [
+        ("[40, 281, 80]", "x", "[38, 80]"),
+        ("[120, 281, 80]", "x", "[38, 80]"),
+        ("[80, 281, 40]", "z", "[80, 38]"),
+        ("[80, 281, 120]", "z", "[80, 38]"),
+    ] {
+        toml.push_str(&format!(
+            "[[resistances]]\nname = \"side\"\ncenter = {c}\naxis = \"{ax}\"\nsize = {sz}\nloss = {{ free_area = 0.0 }}\n"
+        ));
+    }
+    let out = sim(&toml).run(|_| {}).unwrap();
+    let f = out.result.flow.as_ref().unwrap();
+    assert!(f.converged, "{:?}", f.residuals.last());
+    let q = f.fans[0].flow_m3_s;
+    let q_in = f
+        .openings
+        .iter()
+        .find(|o| o.name == "inlet")
+        .unwrap()
+        .inflow_m3_s;
+    // 1D operating point: curve(Q) = ½ρ·41·(Q/A)² on the last curve segment
+    let k = 0.5 * AIR_RHO * 41.0 / (0.16f64 * 0.16).powi(2);
+    let curve = |q: f64| 121.6766 * (0.0547473 - q) / (0.0547473 - 0.0431624);
+    let (mut a, mut b) = (0.0431624, 0.0547473);
+    for _ in 0..60 {
+        let m = 0.5 * (a + b);
+        if curve(m) > k * m * m {
+            a = m;
+        } else {
+            b = m;
+        }
+    }
+    let qx = 0.5 * (a + b);
+    eprintln!("FAN IN HOUSING: Q {q:.5} (through the inlet {q_in:.5}) expected {qx:.5}");
+    assert!(
+        (q_in / q - 1.0).abs() < 0.01,
+        "air recirculating around the fan"
+    );
+    assert!((q / qx - 1.0).abs() < 0.06);
+}
+
 /// Grey radiation between two parallel plates (gap 5 mm, 100 × 100 mm),
 /// closed by re-radiating sides, plus conduction through still air.
 /// Reference: q_rad = σ(T1⁴ − T2⁴)/((1−ε1)/ε1 + 1/F_eff + (1−ε2)/ε2), with

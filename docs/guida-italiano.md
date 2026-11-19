@@ -218,7 +218,16 @@ contiene già tutto, oppure parti dal tuo modello.
   In alternativa *Fixed flow*.
 
 Una ventola sulla parete del dominio aspira o soffia verso l'ambiente; una
-ventola all'interno è un salto di pressione.
+ventola all'interno impone il salto di pressione della curva fra le due
+celle del suo piano. La curva del datasheet è di pressione statica (statica
+in uscita meno totale in ingresso, come al banco prova): il solutore aggiunge
+la pressione dinamica dell'aria che arriva alla ventola. Il mozzo è chiuso.
+
+Se la ventola ha un telaio largo quanto il diametro (ventola da 80 mm in un
+telaio 80 × 80), sulla griglia il telaio sparisce a metà di ogni lato e
+parte dell'aria torna indietro attorno alla ventola: chiudi i lati del
+telaio con pareti sottili (griglia con frazione libera 0). L'import da
+Celsius lo fa da solo.
 
 ### 5.3 Aperture e griglie
 
@@ -232,6 +241,8 @@ ventola all'interno è un salto di pressione.
   avvicinamento. Il valore viene dal diagramma di Idelchik, dal datasheet
   della griglia o da una prova. Se inserisci anche frazione libera e
   diametro dei fori, viene aggiunto il termine laminare 30/(f²·Re).
+- **Parete sottile:** una griglia con frazione libera 0 blocca il flusso
+  sul suo rettangolo (setto di spessore nullo).
 
 ### 5.4 Dissipatori e punti di monitoraggio
 

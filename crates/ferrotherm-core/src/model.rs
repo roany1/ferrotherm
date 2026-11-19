@@ -484,6 +484,10 @@ impl Model {
             let a = axis_of(&r.axis)?;
             let (rlo, rhi, x) = plane_rect(r.center, a, r.size);
             planes[a].push(x * MM);
+            if r.loss.free_area == Some(0.0) {
+                // a thin wall: its plane is enough, its edges need no grid lines
+                continue;
+            }
             let t = tangential(a);
             for q in 0..2 {
                 planes[t[q]].push(rlo[q] * MM);
