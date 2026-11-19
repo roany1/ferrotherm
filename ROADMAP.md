@@ -83,9 +83,14 @@ Done and validated (see README → Verification):
   uniform conforming grid leaves one cell per fin gap and the chips come out
   4–8 K above Celsius, while a sub-model with ≈ 3 cells per gap is within
   about 1 K (README → Verification). With 16 refined regions the whole rack
-  gives 43.6–47.0 °C against 43.8–45.3 °C (12 of 16 chips within 0.5 K);
-  left: a fully settled run, and the fan operating point (0.045 m³/s at
-  ≈ 100 Pa against 0.048 m³/s at 72 Pa).
+  gave 43.6–47.0 °C against 43.8–45.3 °C with the old fan model (0.045 m³/s
+  at ≈ 100 Pa). With the fan jump imposed on the fan plane, closed hubs and
+  closed housing sides the fans match (0.046–0.049 m³/s at 61–91 Pa against
+  0.048 m³/s at 72 Pa) and the refined chips are 42.1–44.9 °C: the four end
+  servers inside the Celsius range, the twelve middle ones 0.8–1.7 K below
+  it. Left: the main-grid flow does not settle (key temperatures swing
+  5–8 K between iterations), which points to a transient or time-averaged
+  run.
 
 ## Phase 4 — Interoperability
 
