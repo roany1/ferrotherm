@@ -11,6 +11,7 @@ mod colormap;
 mod flow_ui;
 mod import_ui;
 mod inspector;
+mod objects;
 mod raster;
 mod results;
 mod view3d;

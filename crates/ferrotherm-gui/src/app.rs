@@ -7,6 +7,7 @@ use crate::colormap::Palette;
 use crate::flow_ui;
 use crate::import_ui::{self, ImportDialog};
 use crate::inspector;
+use crate::objects::{self, ObjectPanel};
 use crate::results::{self, FAIL, PASS, WARN};
 use crate::view3d::{self, box_quads, shade, Clip, Layer, Preset, Quad, Tag, Viewport};
 use eframe::egui::{
@@ -14,7 +15,8 @@ use eframe::egui::{
     Ui, ViewportCommand,
 };
 use ferrotherm_core::case::{
-    Block, Boundary, BoundaryKind, Component, Face, Fan, HeatSink, Loss, Monitor, Resistance,
+    Block, Boundary, BoundaryKind, Component, Face, Fan, HeatSink, Loss, Monitor, Region2,
+    Resistance,
 };
 use ferrotherm_core::model::{component_box, BlockOrigin, Model, Owner};
 use ferrotherm_core::report::Report;
@@ -159,6 +161,12 @@ enum ViewMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeftTab {
+    Objects,
+    Tree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BottomTab {
     Results,
     Convergence,
@@ -256,6 +264,8 @@ pub struct FerroApp {
     /// Live flow residuals of the running solve: (iteration, [mass, momentum, energy]).
     live_residuals: Vec<(usize, [f64; 3])>,
     import: Option<ImportDialog>,
+    left_tab: LeftTab,
+    objects: ObjectPanel,
 }
 
 /// Axis-aligned box (min, max) in mm.
@@ -273,12 +283,10 @@ fn dir_of(path: &Option<PathBuf>) -> PathBuf {
 }
 
 impl FerroApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
-        let mut style = (*cc.egui_ctx.global_style()).clone();
-        style.spacing.item_spacing = egui::vec2(8.0, 5.0);
-        cc.egui_ctx.set_global_style(style);
+    /// The app state with the built-in example case (no window needed).
+    fn with_example() -> Self {
         let case = Case::from_toml(EXAMPLE_CASE).expect("example case parses");
-        let mut app = FerroApp {
+        FerroApp {
             last_json: serde_json::to_string(&case).unwrap_or_default(),
             library: Library::builtin(),
             lib_key: vec![],
@@ -325,7 +333,16 @@ impl FerroApp {
             vector_density: 30,
             live_residuals: Vec::new(),
             import: None,
-        };
+            left_tab: LeftTab::Objects,
+            objects: ObjectPanel::default(),
+        }
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
+        let mut style = (*cc.egui_ctx.global_style()).clone();
+        style.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        cc.egui_ctx.set_global_style(style);
+        let mut app = Self::with_example();
         app.info(format!(
             "FerroTherm {} — author Roany Romano. Loaded the example model; F5 solves.",
             env!("CARGO_PKG_VERSION")
@@ -1425,6 +1442,215 @@ impl FerroApp {
     }
 
     // ------------------------------------------------------------ UI: tree
+
+    /// Left panel: object palette and model tree, switched by tabs at the bottom.
+    fn left_panel(&mut self, ui: &mut Ui) {
+        egui::Panel::bottom("left-tabs").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.left_tab, LeftTab::Objects, "Object Panel");
+                ui.selectable_value(&mut self.left_tab, LeftTab::Tree, "Model Tree");
+            });
+        });
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.left_tab {
+                    LeftTab::Tree => self.tree(ui),
+                    LeftTab::Objects => {
+                        if let Some(a) = self.objects.ui(ui) {
+                            self.add_object(a);
+                        }
+                    }
+                });
+        });
+    }
+
+    /// Add one object chosen in the object panel.
+    fn add_object(&mut self, a: objects::Add) {
+        use objects::Add as A;
+        let d = self.case.domain.clone();
+        let c = self.domain_center();
+        let e = [0, 1, 2].map(|k| d.max[k] - d.min[k]);
+        let around = |h: [f64; 3], z: f64| -> ([f64; 3], [f64; 3]) {
+            (
+                [c[0] - h[0], c[1] - h[1], z],
+                [c[0] + h[0], c[1] + h[1], z + 2.0 * h[2]],
+            )
+        };
+        match a {
+            A::Pcb | A::MezzanineCard => {
+                let z = if a == A::Pcb { c[2] - 0.8 } else { c[2] + 10.0 };
+                let (lo, hi) = around([0.3 * e[0], 0.3 * e[1], 0.8], z);
+                let pcb = serde_json::from_value(serde_json::json!({
+                    "thickness_mm": 1.6, "layers": 4, "copper_oz": 1.0, "coverage": 0.5
+                }))
+                .ok();
+                let i = self.push_block("pcb", None, lo, hi, 0.0);
+                self.case.blocks[i].pcb = pcb;
+            }
+            A::HeatSpreader => {
+                let (lo, hi) = around([15.0, 15.0, 0.5], c[2]);
+                self.push_block("heat_spreader", Some("cu-c11000"), lo, hi, 0.0);
+            }
+            A::HeatSource => {
+                let (lo, hi) = around([5.0, 5.0, 0.5], c[2]);
+                self.push_block("heat_source", Some("cu-c11000"), lo, hi, 5.0);
+            }
+            A::StandOff => {
+                let (lo, hi) = around([2.5, 2.5, 2.5], c[2]);
+                self.push_block("standoff", Some("al-6061-t6"), lo, hi, 0.0);
+            }
+            A::GapPad => {
+                let (lo, hi) = around([10.0, 10.0, 0.5], c[2]);
+                self.push_block("gap_pad", Some("tim-gap-pad-3"), lo, hi, 0.0);
+            }
+            A::Tim => {
+                let (lo, hi) = around([10.0, 10.0, 0.1], c[2]);
+                self.push_block("tim", Some("tim-grease"), lo, hi, 0.0);
+            }
+            A::Solid => self.add_block(),
+            A::Component => self.add_component(),
+            A::HeatSink => self.add_heatsink(),
+            A::Fan => self.add_fan(),
+            A::FanTray => {
+                let s = (0.2 * e[1].min(e[2])).clamp(10.0, 120.0).round();
+                for (dy, dz) in [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)] {
+                    self.add_fan();
+                    let f = self.case.fans.last_mut().expect("fan");
+                    f.center = [d.min[0], c[1] + dy * s, c[2] + dz * s];
+                    f.diameter = Some(s - 2.0);
+                    f.hub_diameter = Some((0.4 * s).round());
+                }
+            }
+            A::FlowDevice => {
+                self.add_fan();
+                let nf = self.case.fans.len();
+                let f = self.case.fans.last_mut().expect("fan");
+                f.name = format!("flow_device_{nf}");
+                f.center = c;
+                f.flow_m3_s = Some(0.005);
+                f.curve.clear();
+                f.hub_diameter = None;
+            }
+            A::Perforated => self.add_resistance(),
+            A::Face => {
+                self.add_resistance();
+                let nr = self.case.resistances.len();
+                let r = self.case.resistances.last_mut().expect("resistance");
+                r.name = format!("face_{nr}");
+                r.loss = Loss {
+                    zeta: 0.0,
+                    free_area: Some(0.0),
+                    hole_diameter_mm: None,
+                };
+            }
+            A::Chassis | A::ChassisSide => {
+                let lo = [0, 1, 2].map(|k| d.min[k] + 0.1 * e[k]);
+                let hi = [0, 1, 2].map(|k| d.max[k] - 0.1 * e[k]);
+                let t = 2.0;
+                let k = self.case.blocks.len() + 1;
+                let sides: &[(&str, usize, bool)] = if a == A::Chassis {
+                    &[
+                        ("left", 0, false),
+                        ("right", 0, true),
+                        ("front", 1, false),
+                        ("back", 1, true),
+                        ("bottom", 2, false),
+                        ("top", 2, true),
+                    ]
+                } else {
+                    &[("side", 0, false)]
+                };
+                for &(nm, ax, high) in sides {
+                    let (mut l, mut h) = (lo, hi);
+                    if high {
+                        l[ax] = hi[ax] - t;
+                    } else {
+                        h[ax] = lo[ax] + t;
+                    }
+                    let i = self.push_block("x", Some("al-6061-t6"), l, h, 0.0);
+                    self.case.blocks[i].name = if a == A::Chassis {
+                        format!("chassis_{k}/{nm}")
+                    } else {
+                        format!("chassis_side_{k}")
+                    };
+                }
+                self.sel = Sel::Block(self.case.blocks.len() - sides.len());
+            }
+            A::TestChamber => self.sel = Sel::Domain,
+            A::Vent | A::VentOpening => {
+                // a square opening in the middle of the −x face
+                let s = 0.3 * e[1].min(e[2]);
+                let n = self.case.boundaries.len() + 1;
+                let name = if a == A::Vent { "vent" } else { "vent_opening" };
+                self.case.boundaries.push(Boundary {
+                    name: format!("{name}_{n}"),
+                    face: Face::Xmin,
+                    region: Some(Region2 {
+                        min: [c[1] - s / 2.0, c[2] - s / 2.0],
+                        max: [c[1] + s / 2.0, c[2] + s / 2.0],
+                    }),
+                    kind: BoundaryKind::Opening,
+                    t_c: None,
+                    h: None,
+                    t_ambient_c: None,
+                    emissivity: None,
+                    finish: None,
+                    t_radiation_c: None,
+                    heat_flux_w_m2: None,
+                    solar_w_m2: None,
+                    absorptivity: None,
+                    velocity_m_s: None,
+                    flow_m3_s: None,
+                    loss: (a == A::Vent).then_some(Loss {
+                        zeta: 0.0,
+                        free_area: Some(0.5),
+                        hole_diameter_mm: Some(3.0),
+                    }),
+                });
+                self.sel = Sel::Boundary(self.case.boundaries.len() - 1);
+                self.ensure_flow_on();
+            }
+            A::HtcBoundary => self.add_boundary(),
+            A::Sensor => self.add_monitor(),
+            A::SensorArray => {
+                for k in 0..5 {
+                    self.add_monitor();
+                    let m = self.case.monitors.last_mut().expect("monitor");
+                    m.position[0] = d.min[0] + e[0] * (k as f64 + 1.0) / 6.0;
+                }
+            }
+        }
+    }
+
+    /// Push a block with a numbered name; returns its index.
+    fn push_block(
+        &mut self,
+        stem: &str,
+        material: Option<&str>,
+        min: [f64; 3],
+        max: [f64; 3],
+        power_w: f64,
+    ) -> usize {
+        let n = self.case.blocks.len() + 1;
+        self.case.blocks.push(Block {
+            name: format!("{stem}_{n}"),
+            material: material.map(str::to_string),
+            pcb: None,
+            min,
+            max,
+            power_w,
+            emissivity: None,
+            finish: None,
+            outline: None,
+            outline_axis: None,
+            min_cells: None,
+        });
+        self.hidden.push(false);
+        let i = self.case.blocks.len() - 1;
+        self.sel = Sel::Block(i);
+        i
+    }
 
     fn tree(&mut self, ui: &mut Ui) {
         let sel = self.sel;
@@ -3152,14 +3378,10 @@ impl eframe::App for FerroApp {
             .show(ui, |ui| self.bottom_panel(ui));
         egui::Panel::left("tree")
             .resizable(true)
-            .default_size(230.0)
+            .default_size(320.0)
             .min_size(160.0)
-            .max_size(380.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.tree(ui));
-            });
+            .max_size(460.0)
+            .show(ui, |ui| self.left_panel(ui));
         egui::Panel::right("inspector")
             .resizable(true)
             .default_size(380.0)
@@ -3194,5 +3416,46 @@ mod tests {
         let sim = Simulation::with_library(c, lib).unwrap();
         let out = sim.run(|_| {}).unwrap();
         assert!(out.report.energy_imbalance_pct.abs() < 1e-3);
+    }
+
+    #[test]
+    fn every_object_panel_item_gives_a_model_that_builds() {
+        use objects::Add::*;
+        let all = [
+            Pcb,
+            MezzanineCard,
+            HeatSpreader,
+            HeatSource,
+            StandOff,
+            Component,
+            GapPad,
+            HtcBoundary,
+            HeatSink,
+            Tim,
+            Fan,
+            FanTray,
+            FlowDevice,
+            Solid,
+            Perforated,
+            Face,
+            Chassis,
+            ChassisSide,
+            TestChamber,
+            Vent,
+            VentOpening,
+            Sensor,
+            SensorArray,
+        ];
+        for a in all {
+            let mut app = FerroApp::with_example();
+            if let Some(f) = app.case.flow.as_mut() {
+                f.enabled = true;
+            }
+            app.add_object(a);
+            assert_eq!(app.hidden.len(), app.case.blocks.len(), "{a:?}");
+            let lib = Library::builtin();
+            let sim = Simulation::with_library(app.case.clone(), lib);
+            assert!(sim.is_ok(), "{a:?}: {:?}", sim.err());
+        }
     }
 }

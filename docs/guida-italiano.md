@@ -72,15 +72,21 @@ tuo sistema:
 
 ```
 ┌────────────┬──────────────────────────────┬───────────────┐
-│ Albero del │        Vista 3D              │  Proprietà    │
-│ modello    │  (geometria / risultati)     │  dell'oggetto │
-│            │                              │  selezionato  │
+│ Oggetti /  │        Vista 3D              │  Proprietà    │
+│ albero del │  (geometria / risultati)     │  dell'oggetto │
+│ modello    │                              │  selezionato  │
 ├────────────┴──────────────────────────────┴───────────────┤
 │ Results · Convergence · Messages                          │
 └───────────────────────────────────────────────────────────┘
 ```
 
-- **Albero (sinistra):** progetto, dominio, griglia, ambiente, solutore,
+- **Object Panel (sinistra, prima scheda in basso):** la tavolozza degli
+  oggetti divisa per categoria (Commonly Used, PCB, PCB Components,
+  Substrate, Heatsinks, Fans, Obstructions, Multi-Fluid, Enclosures, Result
+  Analysis), con ricerca. Un clic su un'icona aggiunge l'oggetto al modello
+  e lo seleziona; il tasto destro lo mette nei *Favourites* (per la
+  sessione). Le icone grigie sono tipi che FerroTherm non modella ancora.
+- **Model Tree (sinistra, seconda scheda):** progetto, dominio, griglia, ambiente, solutore,
   *Air flow*, *Radiation*, poi blocchi, componenti, condizioni al contorno,
   ventole, griglie, dissipatori, punti di monitoraggio. Il `+` aggiunge un
   oggetto; la casella accanto a un blocco lo nasconde nella vista.
