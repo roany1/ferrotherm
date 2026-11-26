@@ -1457,12 +1457,59 @@ impl FerroApp {
                 .show(ui, |ui| match self.left_tab {
                     LeftTab::Tree => self.tree(ui),
                     LeftTab::Objects => {
-                        if let Some(a) = self.objects.ui(ui) {
-                            self.add_object(a);
+                        if let Some(p) = self.objects.ui(ui, &self.library) {
+                            self.add_pick(p);
                         }
                     }
                 });
         });
+    }
+
+    /// Add what was picked in the object panel.
+    fn add_pick(&mut self, p: objects::Pick) {
+        match p {
+            objects::Pick::Std(a) => self.add_object(a),
+            objects::Pick::Package(id) => {
+                let pk = self.library.package(&id).ok();
+                let size = match pk {
+                    Some(pk) if pk.size_mm.is_some() => None,
+                    _ => Some([10.0, 10.0, 2.0]),
+                };
+                let has_rjc = pk.is_some_and(|pk| pk.r_jc.is_some());
+                self.add_component();
+                let c = self.case.components.last_mut().expect("component");
+                c.package = id;
+                c.size = size;
+                c.derating = None;
+                if has_rjc {
+                    // take θJC / θJB from the package
+                    c.r_jc = None;
+                    c.r_jb = None;
+                } else {
+                    self.warn(
+                        "This package has no default θJC: the component keeps 20 K/W, \
+                         set the datasheet value.",
+                    );
+                }
+            }
+            objects::Pick::Material(id) => {
+                let tim = self
+                    .library
+                    .material(&id)
+                    .map(|m| m.category == "tim")
+                    .unwrap_or(false);
+                let c = self.domain_center();
+                let h = if tim {
+                    [10.0, 10.0, 0.1]
+                } else {
+                    [10.0, 10.0, 2.5]
+                };
+                let lo = [c[0] - h[0], c[1] - h[1], c[2] - h[2]];
+                let hi = [c[0] + h[0], c[1] + h[1], c[2] + h[2]];
+                let stem = id.replace('-', "_");
+                self.push_block(&stem, Some(&id), lo, hi, 0.0);
+            }
+        }
     }
 
     /// Add one object chosen in the object panel.
@@ -3456,6 +3503,28 @@ mod tests {
             let lib = Library::builtin();
             let sim = Simulation::with_library(app.case.clone(), lib);
             assert!(sim.is_ok(), "{a:?}: {:?}", sim.err());
+        }
+    }
+
+    #[test]
+    fn every_library_part_gives_a_model_that_builds() {
+        let lib = Library::builtin();
+        let mut picks: Vec<objects::Pick> = lib
+            .packages
+            .iter()
+            .map(|p| objects::Pick::Package(p.id.clone()))
+            .collect();
+        picks.extend(
+            lib.materials
+                .iter()
+                .filter(|m| !matches!(m.category.as_str(), "fluid" | "internal"))
+                .map(|m| objects::Pick::Material(m.id.clone())),
+        );
+        for p in picks {
+            let mut app = FerroApp::with_example();
+            app.add_pick(p.clone());
+            let sim = Simulation::with_library(app.case.clone(), lib.clone());
+            assert!(sim.is_ok(), "{p:?}: {:?}", sim.err());
         }
     }
 }

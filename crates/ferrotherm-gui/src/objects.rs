@@ -5,6 +5,7 @@
 //! offers and of what is still missing.
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use ferrotherm_core::library::Library;
 
 /// Objects the panel can add.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +294,30 @@ fn find(name: &str) -> Option<&'static Tile> {
         .find(|t| t.name == name)
 }
 
+/// What the user picked in the panel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pick {
+    /// A standard object type.
+    Std(Add),
+    /// A component with this library package id.
+    Package(String),
+    /// A solid block (a thin layer for TIMs) of this library material id.
+    Material(String),
+}
+
+/// Material categories offered as library parts, with their folder names.
+/// Fluids and internal materials are not parts you place.
+const MATERIAL_FOLDERS: &[(&str, &str)] = &[
+    ("metal", "Metals"),
+    ("ceramic", "Ceramics"),
+    ("tim", "Thermal interface materials"),
+    ("pcb", "PCB laminates"),
+    ("semiconductor", "Semiconductors"),
+    ("composite", "Composites"),
+    ("joining", "Solders and adhesives"),
+    ("coating", "Coatings"),
+];
+
 /// Panel state kept by the app.
 #[derive(Default)]
 pub struct ObjectPanel {
@@ -305,8 +330,9 @@ const TILE: Vec2 = Vec2::new(72.0, 72.0);
 
 impl ObjectPanel {
     /// Draw the panel; returns the object to add when a tile was clicked.
-    pub fn ui(&mut self, ui: &mut Ui) -> Option<Add> {
+    pub fn ui(&mut self, ui: &mut Ui, lib: &Library) -> Option<Pick> {
         let mut out = None;
+        let mut pick = None;
         ui.spacing_mut().indent = 8.0;
         ui.add_space(4.0);
         ui.add(
@@ -328,11 +354,19 @@ impl ObjectPanel {
                     new
                 })
                 .collect();
-            if hits.is_empty() {
+            let lib_hits = library_rows(lib, &q);
+            if hits.is_empty() && lib_hits.is_empty() {
                 ui.label(RichText::new("No object matches.").weak());
             }
             self.grid(ui, "search", &hits, &mut out);
-            return out;
+            if !lib_hits.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("FerroTherm Library").strong());
+                for r in &lib_hits {
+                    row(ui, r, &mut pick);
+                }
+            }
+            return out.map(Pick::Std).or(pick);
         }
         egui::CollapsingHeader::new(RichText::new("Standard Objects").strong())
             .id_salt("std-objects")
@@ -362,7 +396,59 @@ impl ObjectPanel {
                 }
                 self.grid(ui, "fav", &v, &mut out);
             });
-        out
+        egui::CollapsingHeader::new(RichText::new("FerroTherm Library").strong())
+            .id_salt("lib-objects")
+            .default_open(false)
+            .show(ui, |ui| {
+                let rows = library_rows(lib, "");
+                egui::CollapsingHeader::new("Component packages")
+                    .id_salt("lib-pkgs")
+                    .show(ui, |ui| {
+                        let mut fams: Vec<&str> = Vec::new();
+                        for r in rows.iter().filter(|r| r.package) {
+                            if !fams.contains(&r.folder.as_str()) {
+                                fams.push(&r.folder);
+                            }
+                        }
+                        for f in fams {
+                            egui::CollapsingHeader::new(f)
+                                .id_salt(("lib-fam", f))
+                                .show(ui, |ui| {
+                                    for r in rows.iter().filter(|r| r.package && r.folder == f) {
+                                        row(ui, r, &mut pick);
+                                    }
+                                });
+                        }
+                    });
+                egui::CollapsingHeader::new("Materials")
+                    .id_salt("lib-mats")
+                    .show(ui, |ui| {
+                        for (_, folder) in MATERIAL_FOLDERS {
+                            let any = rows.iter().any(|r| !r.package && r.folder == *folder);
+                            if !any {
+                                continue;
+                            }
+                            egui::CollapsingHeader::new(*folder)
+                                .id_salt(("lib-cat", *folder))
+                                .show(ui, |ui| {
+                                    for r in
+                                        rows.iter().filter(|r| !r.package && r.folder == *folder)
+                                    {
+                                        row(ui, r, &mut pick);
+                                    }
+                                });
+                        }
+                    });
+                ui.label(
+                    RichText::new(
+                        "Built-in data plus any library files loaded from the Libraries menu. \
+                         Click a package to add a component, a material to add a solid block.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+        out.map(Pick::Std).or(pick)
     }
 
     fn grid(&mut self, ui: &mut Ui, salt: &str, tiles: &[&Tile], out: &mut Option<Add>) {
@@ -430,6 +516,121 @@ impl ObjectPanel {
                 self.favourites.push(name.to_string());
             }
         }
+    }
+}
+
+/// One library entry shown as a row.
+struct LibRow {
+    package: bool,
+    id: String,
+    name: String,
+    folder: String,
+    tip: String,
+}
+
+/// Library entries whose name or id contains `q` (all when `q` is empty).
+fn library_rows(lib: &Library, q: &str) -> Vec<LibRow> {
+    let hit = |id: &str, name: &str| {
+        q.is_empty() || id.to_lowercase().contains(q) || name.to_lowercase().contains(q)
+    };
+    let mut v = Vec::new();
+    for p in &lib.packages {
+        if !hit(&p.id, &p.name) {
+            continue;
+        }
+        let mut tip = format!("{}\n{}", p.id, p.name);
+        if let Some(r) = p.r_jc {
+            tip += &format!("\nθJC {r} K/W");
+        }
+        if let Some(r) = p.r_jb {
+            tip += &format!("\nθJB {r} K/W");
+        }
+        if let Some(s) = p.size_mm {
+            tip += &format!("\n{} × {} × {} mm", s[0], s[1], s[2]);
+        }
+        if !p.standard.is_empty() {
+            tip += &format!("\nSource: {}", p.standard);
+        }
+        v.push(LibRow {
+            package: true,
+            id: p.id.clone(),
+            name: p.name.clone(),
+            folder: if p.family.is_empty() {
+                "Other".into()
+            } else {
+                p.family.clone()
+            },
+            tip,
+        });
+    }
+    for m in &lib.materials {
+        let Some((_, folder)) = MATERIAL_FOLDERS.iter().find(|(c, _)| *c == m.category) else {
+            continue;
+        };
+        if !hit(&m.id, &m.name) {
+            continue;
+        }
+        let k = m.k.as_vec();
+        let ks = if k[0] == k[1] && k[1] == k[2] {
+            format!("{} W/m·K", k[0])
+        } else {
+            format!("{} / {} / {} W/m·K", k[0], k[1], k[2])
+        };
+        let mut tip = format!(
+            "{}\n{}\nk {ks}, ρ {} kg/m³, cp {} J/kg·K",
+            m.id, m.name, m.density, m.cp
+        );
+        if !m.source.is_empty() {
+            tip += &format!("\nSource: {}", m.source);
+        }
+        v.push(LibRow {
+            package: false,
+            id: m.id.clone(),
+            name: m.name.clone(),
+            folder: folder.to_string(),
+            tip,
+        });
+    }
+    v
+}
+
+fn row(ui: &mut Ui, r: &LibRow, pick: &mut Option<Pick>) {
+    let resp = ui
+        .horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+            let fg = ui.visuals().text_color();
+            let st = Stroke::new(1.0, fg);
+            if r.package {
+                ui.painter()
+                    .rect_stroke(rect.shrink(3.0), 1.0, st, egui::StrokeKind::Middle);
+                for k in 0..3 {
+                    let x = rect.left() + 5.0 + 3.0 * k as f32;
+                    ui.painter().line_segment(
+                        [Pos2::new(x, rect.top()), Pos2::new(x, rect.top() + 3.0)],
+                        st,
+                    );
+                    ui.painter().line_segment(
+                        [
+                            Pos2::new(x, rect.bottom() - 3.0),
+                            Pos2::new(x, rect.bottom()),
+                        ],
+                        st,
+                    );
+                }
+            } else {
+                ui.painter()
+                    .rect_filled(rect.shrink(3.0), 1.0, fg.gamma_multiply(0.5));
+            }
+            ui.add(egui::Label::new(&r.name).truncate().sense(Sense::click()))
+        })
+        .inner
+        .on_hover_text(&r.tip);
+    if resp.clicked() {
+        *pick = Some(if r.package {
+            Pick::Package(r.id.clone())
+        } else {
+            Pick::Material(r.id.clone())
+        });
     }
 }
 

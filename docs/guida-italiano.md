@@ -86,6 +86,13 @@ tuo sistema:
   Analysis), con ricerca. Un clic su un'icona aggiunge l'oggetto al modello
   e lo seleziona; il tasto destro lo mette nei *Favourites* (per la
   sessione). Le icone grigie sono tipi che FerroTherm non modella ancora.
+  In fondo c'è la *FerroTherm Library*: i package dei componenti (divisi
+  per famiglia) e i materiali (metalli, ceramici, TIM, laminati PCB…) della
+  libreria integrata più quelli caricati dal menu *Libraries*. Un clic su un
+  package aggiunge un componente con quel package; un clic su un materiale
+  aggiunge un blocco di quel materiale (uno strato da 0,2 mm se è un TIM).
+  Passando il mouse vedi i valori e la fonte. La ricerca trova anche le voci
+  della libreria.
 - **Model Tree (sinistra, seconda scheda):** progetto, dominio, griglia, ambiente, solutore,
   *Air flow*, *Radiation*, poi blocchi, componenti, condizioni al contorno,
   ventole, griglie, dissipatori, punti di monitoraggio. Il `+` aggiunge un
