@@ -93,6 +93,24 @@ tuo sistema:
   aggiunge un blocco di quel materiale (uno strato da 0,2 mm se è un TIM).
   Passando il mouse vedi i valori e la fonte. La ricerca trova anche le voci
   della libreria.
+- **Trascinare nella vista 3D:** ogni icona attiva e ogni voce della
+  libreria si può trascinare nella vista. Se la rilasci su una faccia,
+  l'oggetto ci si appoggia sopra (un componente sulla PCB, una PCB sul fondo
+  dello chassis); nel vuoto va sul piano medio del dominio rivolto verso di
+  te. Se dal lato di quella faccia non c'è spazio dentro il dominio,
+  l'oggetto resta sovrapposto e compare un avviso.
+- **Maniglie:** l'oggetto selezionato mostra tre frecce dal centro (X rossa,
+  Y verde, Z blu) per spostarlo e un quadratino al centro di ogni faccia per
+  ridimensionarlo; durante il trascinamento vedi la misura. Passi da 0,1 mm,
+  da 1 mm tenendo premuto Ctrl. L'oggetto resta dentro il dominio. Ventole e
+  resistenze si ridimensionano solo nel loro piano, i punti di monitor si
+  spostano soltanto; selezionando il dominio (*Test Chamber*) ne cambi le
+  dimensioni. Sugli oggetti troppo piccoli a schermo i quadratini spariscono:
+  basta fare zoom.
+- **Chassis:** le sei pareti si muovono e si ridimensionano insieme e restano
+  dello stesso spessore. Selezionando una parete compare in alto la scheda
+  *Chassis* con posizione, dimensioni, spessore delle pareti e materiale di
+  tutte le pareti.
 - **Model Tree (sinistra, seconda scheda):** progetto, dominio, griglia, ambiente, solutore,
   *Air flow*, *Radiation*, poi blocchi, componenti, condizioni al contorno,
   ventole, griglie, dissipatori, punti di monitoraggio. Il `+` aggiunge un

@@ -351,6 +351,8 @@ pub struct Viewport {
     last_motion: Option<Instant>,
     /// Device pixels per point used for the last raster.
     ppp: f32,
+    /// A handle has the primary drag: do not orbit.
+    pub grab: bool,
 }
 
 impl Default for Viewport {
@@ -369,6 +371,7 @@ impl Default for Viewport {
             raster_key: 0,
             last_motion: None,
             ppp: 1.0,
+            grab: false,
         }
     }
 }
@@ -419,14 +422,14 @@ impl Viewport {
         let b = self.cam.basis();
         let panning = response.dragged_by(PointerButton::Secondary)
             || response.dragged_by(PointerButton::Middle)
-            || (response.dragged_by(PointerButton::Primary) && shift);
+            || (response.dragged_by(PointerButton::Primary) && shift && !self.grab);
         if panning {
             let s = self.cam.scale;
             self.cam.target = add(
                 self.cam.target,
                 add(mul(b.right, -delta.x / s), mul(b.up, delta.y / s)),
             );
-        } else if response.dragged_by(PointerButton::Primary) {
+        } else if response.dragged_by(PointerButton::Primary) && !self.grab {
             self.cam.yaw -= delta.x * 0.008;
             self.cam.pitch = (self.cam.pitch + delta.y * 0.008).clamp(-1.5705, 1.5705);
         }
@@ -667,6 +670,26 @@ impl Viewport {
             .iter()
             .find(|d| point_in_quad(pos, &d.pts))
             .map(|d| (d.layer as usize, d.quad))
+    }
+
+    /// Screen displacement (points) of one mm along world axis `axis`.
+    pub fn screen_axis(&self, axis: usize) -> Vec2 {
+        let b = self.cam.basis();
+        let mut e = [0.0f32; 3];
+        e[axis] = 1.0;
+        Vec2::new(dot(e, b.right), -dot(e, b.up)) * self.cam.scale
+    }
+
+    /// The viewing ray through a screen point: (a point on it, direction into the scene).
+    pub fn ray(&self, rect: Rect, pos: Pos2) -> (V3, V3) {
+        let b = self.cam.basis();
+        let o = pos - rect.center();
+        let s = self.cam.scale;
+        let p = add(
+            self.cam.target,
+            add(mul(b.right, o.x / s), mul(b.up, -o.y / s)),
+        );
+        (p, b.fwd)
     }
 
     pub fn project(&self, rect: Rect, p: V3) -> Pos2 {

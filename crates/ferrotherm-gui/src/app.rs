@@ -3,6 +3,8 @@
 
 //! Application state and layout.
 
+mod manip;
+
 use crate::colormap::Palette;
 use crate::flow_ui;
 use crate::import_ui::{self, ImportDialog};
@@ -266,6 +268,8 @@ pub struct FerroApp {
     import: Option<ImportDialog>,
     left_tab: LeftTab,
     objects: ObjectPanel,
+    handles: manip::DrawnHandles,
+    handle_drag: Option<manip::HandleDrag>,
 }
 
 /// Axis-aligned box (min, max) in mm.
@@ -335,6 +339,8 @@ impl FerroApp {
             import: None,
             left_tab: LeftTab::Objects,
             objects: ObjectPanel::default(),
+            handles: Vec::new(),
+            handle_drag: None,
         }
     }
 
@@ -2008,6 +2014,7 @@ impl FerroApp {
                 }
             }
             Sel::Block(i) => {
+                manip::chassis_sheet(ui, &mut self.case.blocks, i, lib);
                 if let Some(b) = self.case.blocks.get_mut(i) {
                     inspector::block(ui, b, lib, i);
                     if let Some(s) = valid {
@@ -2530,7 +2537,11 @@ impl FerroApp {
     fn selected_box(&self) -> Option<([f32; 3], [f32; 3])> {
         let f = |v: [f64; 3]| v.map(|x| x as f32);
         match self.sel {
-            Sel::Block(i) => self.case.blocks.get(i).map(|b| (f(b.min), f(b.max))),
+            Sel::Block(i) => match self.manip_target() {
+                // a chassis wall selects the whole chassis
+                Some(t) if t.is_group() => Some((f(t.lo), f(t.hi))),
+                _ => self.case.blocks.get(i).map(|b| (f(b.min), f(b.max))),
+            },
             Sel::Component(i) => self
                 .case
                 .components
@@ -2635,6 +2646,7 @@ impl FerroApp {
             Color32::from_rgb(232, 236, 242)
         };
         let text = ui.visuals().text_color();
+        self.handles_before_view(ui);
         let frame = self.vp.begin(ui, bounds);
         let rect = frame.rect;
         let edge = if dark {
@@ -2790,6 +2802,8 @@ impl FerroApp {
                 Stroke::new(2.0, Color32::from_rgb(255, 165, 0)),
             );
         }
+        self.draw_handles(ui, rect);
+        self.handle_drop(ui, &frame);
         self.vp.draw_axes(ui, rect);
         if results && self.vectors && self.clip.enabled && self.field != Field::Pressure {
             self.draw_vectors(ui, rect);
@@ -2824,7 +2838,7 @@ impl FerroApp {
         painter.text(
             rect.left_bottom() + egui::vec2(80.0, -10.0),
             Align2::LEFT_BOTTOM,
-            "drag: rotate · right-drag/shift: pan · wheel: zoom · double-click: fit",
+            "drag: rotate · right-drag/shift: pan · wheel: zoom · double-click: fit · handles: arrows move, squares resize (Ctrl: 1 mm steps)",
             FontId::proportional(11.0),
             ui.visuals().weak_text_color(),
         );

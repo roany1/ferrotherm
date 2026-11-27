@@ -458,7 +458,7 @@ impl ObjectPanel {
             .spacing([0.0, 2.0])
             .show(ui, |ui| {
                 for (i, t) in tiles.iter().enumerate() {
-                    let (rect, resp) = ui.allocate_exact_size(TILE, Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(TILE, Sense::click_and_drag());
                     let on = t.add.is_some();
                     let vis = ui.visuals();
                     if on && resp.hovered() {
@@ -489,6 +489,12 @@ impl ObjectPanel {
                     } else {
                         resp.on_hover_text("Not available in FerroTherm yet")
                     };
+                    if let (true, Some(a)) = (on, t.add) {
+                        resp.dnd_set_drag_payload(Pick::Std(a));
+                        if resp.dragged() {
+                            drag_label(ui, t.name);
+                        }
+                    }
                     if on && resp.clicked() {
                         *out = t.add;
                     }
@@ -621,10 +627,23 @@ fn row(ui: &mut Ui, r: &LibRow, pick: &mut Option<Pick>) {
                 ui.painter()
                     .rect_filled(rect.shrink(3.0), 1.0, fg.gamma_multiply(0.5));
             }
-            ui.add(egui::Label::new(&r.name).truncate().sense(Sense::click()))
+            ui.add(
+                egui::Label::new(&r.name)
+                    .truncate()
+                    .sense(Sense::click_and_drag()),
+            )
         })
         .inner
         .on_hover_text(&r.tip);
+    let payload = if r.package {
+        Pick::Package(r.id.clone())
+    } else {
+        Pick::Material(r.id.clone())
+    };
+    resp.dnd_set_drag_payload(payload);
+    if resp.dragged() {
+        drag_label(ui, &r.name);
+    }
     if resp.clicked() {
         *pick = Some(if r.package {
             Pick::Package(r.id.clone())
@@ -632,6 +651,27 @@ fn row(ui: &mut Ui, r: &LibRow, pick: &mut Option<Pick>) {
             Pick::Material(r.id.clone())
         });
     }
+}
+
+/// Label that follows the pointer while an object is dragged to the 3D view.
+fn drag_label(ui: &Ui, name: &str) {
+    let Some(p) = ui.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("obj-drag"),
+    ));
+    let galley = painter.layout_no_wrap(
+        format!("{name} → drop in the 3D view"),
+        egui::FontId::proportional(12.0),
+        Color32::WHITE,
+    );
+    let at = p + Vec2::new(14.0, 10.0);
+    let r = Rect::from_min_size(at, galley.size()).expand(4.0);
+    painter.rect_filled(r, 3.0, Color32::from_black_alpha(210));
+    painter.galley(at, galley, Color32::WHITE);
 }
 
 /// Simple line icons drawn in FerroTherm's own style.
