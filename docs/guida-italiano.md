@@ -364,6 +364,54 @@ ferrotherm defeature chassis.step semplice.step --holes 8 --fillets 3 --chamfers
 Vengono riconosciute le facce analitiche (cilindri, coni, tori, piani): un
 foro esportato come superficie B-spline non viene riconosciuto.
 
+### 6.2 Togliere viti, rondelle e dadi (stesso file STEP)
+
+*File → Remove fasteners from STEP…* apre un file STEP, riconosce le
+minuterie (viti, rondelle, dadi, rivetti, spine, inserti, distanziali) e
+mostra l'elenco: tipo, confidenza, numero di istanze, dimensioni, nome e
+motivo. Le voci spuntate vengono tolte; *Save STEP without the selected
+parts…* scrive un **nuovo** file (l'originale non viene toccato) e, se
+spuntato, lo apre subito nella finestra di import.
+
+Il riconoscimento è un classificatore a regole, non un modello addestrato:
+
+- **nome** (decide da solo la selezione): parole in italiano, inglese,
+  tedesco, francese e spagnolo (vite, TCEI, rondella, rosetta, grower, dado,
+  rivetto, spina, PEM, distanziale, screw, washer, nut…), numeri di norma
+  (ISO 4762, DIN 912, UNI 5931, ISO 7089, UNI 6592, ISO 4032…) e filettature
+  con lunghezza (M3x8, #4-40);
+- **forma** nel sistema di riferimento del pezzo (da sola propone soltanto,
+  senza spuntare): disco sottile davvero circolare (rondella), esagono con
+  foro (dado), cilindro allungato (vite);
+- **famiglia di codice**: un pezzo con la forma giusta e lo stesso prefisso
+  di codice (prime 4 cifre) di una minuteria riconosciuta dal nome viene
+  proposto con più confidenza (per esempio 2146… come
+  2146-0514_ROSETTA);
+- i nomi di PCB, schede e designatori (R12, C3, U1…) bloccano un
+  riconoscimento basato solo sulla forma, così condensatori, LED e pin non
+  vengono presi per viti;
+- i distanziali non sono mai spuntati in automatico: portano calore dalla
+  scheda allo chassis.
+
+Il file salvato è lo **stesso testo STEP** con meno righe: vengono tolti solo
+i record dei pezzi scelti (prodotto, definizioni, geometria, occorrenze con
+le loro trasformazioni, colori e layer) e le voci che li citavano nelle
+liste. Intestazione, unità, nomi, colori, PCB, componenti e posizioni restano
+identici byte per byte; un sottoassieme rimasto vuoto viene tolto anche lui.
+Prima di scrivere viene controllato che non resti nessun riferimento
+mancante.
+
+Da riga di comando:
+
+```bash
+ferrotherm fasteners assieme.stp                    # solo l'elenco
+ferrotherm fasteners assieme.stp -o pulito.stp      # toglie quelli proposti
+ferrotherm fasteners assieme.stp -o pulito.stp --possible --keep 2146-0601
+```
+
+`--possible` toglie anche quelli proposti solo dalla forma, `--standoffs`
+anche i distanziali, `--keep` salva i pezzi che contengono quel testo.
+
 La geometria di FerroTherm è fatta di blocchi allineati agli assi: le
 superfici inclinate o curve diventano a gradini. Per schede e componenti
 con potenza è meglio importare i dati ECAD (tutorial A) e usare lo STEP solo

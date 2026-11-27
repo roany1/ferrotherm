@@ -157,6 +157,27 @@ enum Cmd {
         /// Output file; format from the extension (.step/.stp, .stl, .emn)
         out: PathBuf,
     },
+    /// Find screws, washers, nuts, rivets, pins, inserts and standoffs in a
+    /// STEP assembly and write the same file without them (everything else,
+    /// header, units, names, colours, PCBs, is copied unchanged).
+    Fasteners {
+        input: PathBuf,
+        /// Cleaned STEP file to write (without it the candidates are only listed)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Also remove the "possible" ones (geometry only, below the threshold)
+        #[arg(long)]
+        possible: bool,
+        /// Also remove standoffs / spacers (kept by default: they conduct heat)
+        #[arg(long)]
+        standoffs: bool,
+        /// Keep parts whose name contains this text (repeatable)
+        #[arg(long)]
+        keep: Vec<String>,
+        /// Write the scan as JSON
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Simplify a STEP model before import (OpenCascade defeaturing): close
     /// holes, remove bosses, fillets and chamfers, drop small parts, box
     /// nearly box-shaped parts. Writes a new STEP file.
@@ -771,6 +792,80 @@ fn main() -> Result<()> {
                 _ => anyhow::bail!("unknown export format '.{ext}' (use .step, .stl or .emn)"),
             }
             println!("wrote {}", out.display());
+        }
+        Cmd::Fasteners {
+            input,
+            out,
+            possible,
+            standoffs,
+            keep,
+            report,
+        } => {
+            use ferrotherm_io::fasteners;
+            let text = std::fs::read_to_string(&input)
+                .with_context(|| format!("reading {}", input.display()))?;
+            let t0 = std::time::Instant::now();
+            let sc = fasteners::scan(&text).map_err(anyhow::Error::msg)?;
+            println!(
+                "{}: {} parts, {} assemblies, unit {} mm — {} candidates ({:.1} s)",
+                input.display(),
+                sc.parts,
+                sc.assemblies,
+                sc.unit_mm,
+                sc.candidates.len(),
+                t0.elapsed().as_secs_f64()
+            );
+            let chosen = |c: &fasteners::Candidate| {
+                let kind_ok = c.kind != fasteners::Kind::Standoff || standoffs;
+                let level_ok = c.suggested || (possible && c.score >= fasteners::LIST);
+                let kept = keep
+                    .iter()
+                    .any(|k| c.name.to_lowercase().contains(&k.to_lowercase()));
+                (kind_ok && level_ok && !kept)
+                    || (standoffs
+                        && c.kind == fasteners::Kind::Standoff
+                        && c.score >= fasteners::SUGGEST
+                        && !kept)
+            };
+            for c in &sc.candidates {
+                let size = c
+                    .size_mm
+                    .map(|s| format!("{:.1}×{:.1}×{:.1} mm", s[0], s[1], s[2]))
+                    .unwrap_or_else(|| "—".into());
+                println!(
+                    "  [{}] {:<8} {:>4.0}%  ×{:<4} {:<22} {}  ({})",
+                    if chosen(c) { "x" } else { " " },
+                    c.kind.label(),
+                    c.score * 100.0,
+                    c.instances,
+                    size,
+                    c.name,
+                    c.reasons.join("; ")
+                );
+            }
+            if let Some(r) = report {
+                std::fs::write(&r, serde_json::to_string_pretty(&sc)?)?;
+            }
+            if let Some(o) = out {
+                let ids: Vec<u64> = sc
+                    .candidates
+                    .iter()
+                    .filter(|c| chosen(c))
+                    .map(|c| c.id)
+                    .collect();
+                let (clean, rep) = fasteners::remove(&text, &ids).map_err(anyhow::Error::msg)?;
+                std::fs::write(&o, clean)?;
+                println!(
+                    "wrote {}: removed {} parts ({} occurrences), {} records deleted, {} edited, {} → {} bytes",
+                    o.display(),
+                    rep.parts.len(),
+                    rep.occurrences,
+                    rep.deleted_records,
+                    rep.edited_records,
+                    rep.bytes_before,
+                    rep.bytes_after
+                );
+            }
         }
         Cmd::Defeature {
             input,

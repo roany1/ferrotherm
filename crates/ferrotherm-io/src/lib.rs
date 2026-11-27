@@ -12,6 +12,7 @@ pub mod celsius;
 pub mod defeature;
 pub mod ecad;
 pub mod export;
+pub mod fasteners;
 pub mod geom;
 pub mod gerber;
 pub mod idf;

@@ -270,6 +270,7 @@ pub struct FerroApp {
     objects: ObjectPanel,
     handles: manip::DrawnHandles,
     handle_drag: Option<manip::HandleDrag>,
+    fasteners: Option<crate::fasteners_ui::FastenerTool>,
 }
 
 /// Axis-aligned box (min, max) in mm.
@@ -341,6 +342,7 @@ impl FerroApp {
             objects: ObjectPanel::default(),
             handles: Vec::new(),
             handle_drag: None,
+            fasteners: None,
         }
     }
 
@@ -1313,6 +1315,22 @@ impl FerroApp {
                     .clicked()
                 {
                     self.import_file(&ctx, true);
+                }
+                if ui
+                    .button("Remove fasteners from STEP…")
+                    .on_hover_text(
+                        "Find screws, washers, nuts… in a STEP assembly and save the same \
+                         file without them",
+                    )
+                    .clicked()
+                {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("STEP", &["stp", "step", "STP", "STEP"])
+                        .set_directory(dir_of(&self.path))
+                        .pick_file()
+                    {
+                        self.fasteners = Some(crate::fasteners_ui::FastenerTool::open(p, &ctx));
+                    }
                 }
                 ui.menu_button("Export geometry", |ui| {
                     if ui.button("STEP (AP214 solids)…").clicked() {
@@ -3141,6 +3159,13 @@ impl FerroApp {
     // ------------------------------------------------------------ UI: windows
 
     fn windows(&mut self, ctx: &egui::Context) {
+        if let Some(t) = &mut self.fasteners {
+            match t.show(ctx) {
+                Some(crate::fasteners_ui::Action::Close) => self.fasteners = None,
+                Some(crate::fasteners_ui::Action::Import(p)) => self.open_import(p, ctx),
+                None => {}
+            }
+        }
         if let Some(dlg) = &mut self.import {
             match dlg.show(ctx, &self.library, self.case.domain.min) {
                 Some(import_ui::Action::Add(fr, fit)) => {

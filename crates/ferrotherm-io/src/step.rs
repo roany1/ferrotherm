@@ -30,25 +30,25 @@ pub enum Param {
 }
 
 impl Param {
-    fn as_ref(&self) -> Option<u64> {
+    pub fn as_ref(&self) -> Option<u64> {
         match self {
             Param::Ref(r) => Some(*r),
             _ => None,
         }
     }
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             Param::Str(s) => s,
             _ => "",
         }
     }
-    fn as_list(&self) -> &[Param] {
+    pub fn as_list(&self) -> &[Param] {
         match self {
             Param::List(v) => v,
             _ => &[],
         }
     }
-    fn as_num(&self) -> Option<f64> {
+    pub fn as_num(&self) -> Option<f64> {
         match self {
             Param::Num(n) => Some(*n),
             Param::Typed(_, p) => p.as_num(),
@@ -486,6 +486,24 @@ impl<'a> Ctx<'a> {
             }
         }
     }
+}
+
+/// First length unit declared in the file, in mm (1 if none).
+pub fn length_unit_mm(ents: &HashMap<u64, Entity>) -> f64 {
+    let c = Ctx { e: ents };
+    for (id, ent) in ents {
+        if ent.iter().any(|(n, _)| n == "GLOBAL_UNIT_ASSIGNED_CONTEXT") {
+            if let Some(u) = context_unit_mm(&c, *id) {
+                return u;
+            }
+        }
+    }
+    1.0
+}
+
+/// Length unit of one representation context, in mm.
+pub fn context_length_unit_mm(ents: &HashMap<u64, Entity>, ctx_id: u64) -> Option<f64> {
+    context_unit_mm(&Ctx { e: ents }, ctx_id)
 }
 
 /// Length unit of a representation context, in mm.

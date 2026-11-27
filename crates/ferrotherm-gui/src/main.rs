@@ -8,6 +8,7 @@
 
 mod app;
 mod colormap;
+mod fasteners_ui;
 mod flow_ui;
 mod import_ui;
 mod inspector;
