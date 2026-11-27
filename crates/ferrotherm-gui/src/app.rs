@@ -1317,7 +1317,7 @@ impl FerroApp {
                     self.import_file(&ctx, true);
                 }
                 if ui
-                    .button("Remove fasteners from STEP…")
+                    .button("Clean STEP (fasteners, parts, holes)…")
                     .on_hover_text(
                         "Find screws, washers, nuts… in a STEP assembly and save the same \
                          file without them",

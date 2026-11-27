@@ -88,6 +88,22 @@ pub struct Scan {
     pub unit_mm: f64,
     /// Sorted by score, highest first.
     pub candidates: Vec<Candidate>,
+    /// Every part and sub-assembly (not the top one), in file order, for
+    /// removing any part by hand.
+    pub all_parts: Vec<PartInfo>,
+}
+
+/// One part definition of the assembly.
+#[derive(Debug, Clone, Serialize)]
+pub struct PartInfo {
+    pub id: u64,
+    pub name: String,
+    pub instances: usize,
+    pub assembly: bool,
+    /// Name of the (first) assembly that uses it.
+    pub parent: String,
+    /// Local bounding box, sorted extents, mm.
+    pub size_mm: Option<[f64; 3]>,
 }
 
 /// Score from which a part is selected by default.
@@ -599,12 +615,8 @@ fn structure(e: &HashMap<u64, Entity>) -> Structure {
 
 /// Local bounding box of a part's own geometry, sorted extents in mm.
 fn part_size(e: &HashMap<u64, Entity>, reps: &[u64], unit_global: f64) -> Option<([f64; 3], f64)> {
-    let mut lo = [f64::INFINITY; 3];
-    let mut hi = [f64::NEG_INFINITY; 3];
-    let mut max_r = 0.0f64;
-    let mut seen = HashSet::new();
-    let mut stack: Vec<u64> = Vec::new();
     let mut unit = unit_global;
+    let mut roots = Vec::new();
     for &r in reps {
         if let Some((_, p)) = e.get(&r).and_then(|x| x.first()) {
             if let Some(u) = p
@@ -614,17 +626,40 @@ fn part_size(e: &HashMap<u64, Entity>, reps: &[u64], unit_global: f64) -> Option
             {
                 unit = u;
             }
-            for it in p.get(1).map(|x| x.as_list()).unwrap_or(&[]) {
-                if let Some(id) = it.as_ref() {
-                    stack.push(id);
-                }
-            }
+            roots.extend(
+                p.get(1)
+                    .map(|x| x.as_list())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(Param::as_ref),
+            );
         }
     }
+    let (lo, hi, max_r) = geom_box(e, &roots, true)?;
+    let mut s = [0, 1, 2].map(|k| (hi[k] - lo[k]) * unit);
+    s.sort_by(f64::total_cmp);
+    Some((s, 2.0 * max_r * unit))
+}
+
+/// Bounding box (file units) of the geometry under some items: vertices,
+/// circles / ellipses, spline control points; and the largest circle radius.
+/// `controls`: also spline control points (they may lie outside the shape;
+/// fine for a size estimate, not for comparing two outlines).
+fn geom_box(
+    e: &HashMap<u64, Entity>,
+    roots: &[u64],
+    controls: bool,
+) -> Option<([f64; 3], [f64; 3], f64)> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    let mut max_r = 0.0f64;
+    let mut seen = HashSet::new();
+    let mut stack: Vec<u64> = roots.to_vec();
+    // 3-D points only: 2-D ones are surface parameters (pcurves)
     let point = |id: u64| -> Option<[f64; 3]> {
         let p = rec(e, id, "CARTESIAN_POINT")?;
         let c = p.get(1)?.as_list();
-        Some([0, 1, 2].map(|k| c.get(k).and_then(Param::as_num).unwrap_or(0.0)))
+        (c.len() == 3).then(|| [0, 1, 2].map(|k| c[k].as_num().unwrap_or(0.0)))
     };
     let dir = |id: Option<u64>| -> Option<[f64; 3]> {
         let p = rec(e, id?, "DIRECTION")?;
@@ -681,7 +716,10 @@ fn part_size(e: &HashMap<u64, Entity>, reps: &[u64], unit_global: f64) -> Option
                     }
                     continue;
                 }
-                n if n.starts_with("B_SPLINE") || n == "POLYLINE" || n == "POLY_LOOP" => {
+                "PCURVE" | "DEFINITIONAL_REPRESENTATION" => continue,
+                n if controls
+                    && (n.starts_with("B_SPLINE") || n == "POLYLINE" || n == "POLY_LOOP") =>
+                {
                     for q in p {
                         for c in q.as_list() {
                             for id2 in std::iter::once(c).chain(c.as_list().iter()) {
@@ -710,9 +748,7 @@ fn part_size(e: &HashMap<u64, Entity>, reps: &[u64], unit_global: f64) -> Option
     if !lo[0].is_finite() {
         return None;
     }
-    let mut s = [0, 1, 2].map(|k| (hi[k] - lo[k]) * unit);
-    s.sort_by(f64::total_cmp);
-    Some((s, 2.0 * max_r * unit))
+    Some((lo, hi, max_r))
 }
 
 /// Find the fasteners of a STEP file.
@@ -748,21 +784,46 @@ pub fn scan(text: &str) -> Result<Scan, String> {
         }
     }
     let mut out = Vec::new();
+    let mut all_parts = Vec::new();
     let mut parts = 0;
+    let parent_of: HashMap<u64, u64> = st
+        .children
+        .iter()
+        .flat_map(|(p, kids)| kids.iter().map(move |k| (*k, *p)))
+        .collect();
     for &pd in &st.pds {
-        if st.children.get(&pd).is_some_and(|k| !k.is_empty()) {
+        let is_asm = st.children.get(&pd).is_some_and(|k| !k.is_empty());
+        let (disp, all) = st.names.get(&pd).cloned().unwrap_or_default();
+        let n = count.get(&pd).copied().unwrap_or(1);
+        let geo = if is_asm {
+            None
+        } else {
+            st.reps.get(&pd).and_then(|r| part_size(&e, r, unit))
+        };
+        if let Some(par) = parent_of.get(&pd) {
+            all_parts.push(PartInfo {
+                id: pd,
+                name: if disp.is_empty() {
+                    format!("#{pd}")
+                } else {
+                    disp.clone()
+                },
+                instances: n,
+                assembly: is_asm,
+                parent: st.names.get(par).map(|x| x.0.clone()).unwrap_or_default(),
+                size_mm: geo.map(|g| g.0),
+            });
+        }
+        if is_asm {
             continue; // assemblies are not classified themselves
         }
         parts += 1;
-        let (disp, all) = st.names.get(&pd).cloned().unwrap_or_default();
         let inst = st
             .inst_names
             .get(&pd)
             .map(|v| v.join(" "))
             .unwrap_or_default();
-        let geo = st.reps.get(&pd).and_then(|r| part_size(&e, r, unit));
         let size = geo.map(|g| g.0);
-        let n = count.get(&pd).copied().unwrap_or(1);
         if let Some((kind, score, reasons, by_name)) = classify(&format!("{all} {inst}"), geo, n) {
             if score >= LIST {
                 out.push(Candidate {
@@ -805,6 +866,7 @@ pub fn scan(text: &str) -> Result<Scan, String> {
         assemblies: st.pds.len() - parts,
         unit_mm: unit,
         candidates: out,
+        all_parts,
     })
 }
 
@@ -1004,6 +1066,28 @@ pub fn remove(text: &str, part_ids: &[u64]) -> Result<(String, Removal), String>
         if !st.names.contains_key(p) {
             return Err(format!("#{p} is not a part definition of this file"));
         }
+    }
+    // a removed assembly takes the parts used only inside it
+    loop {
+        let mut more = Vec::new();
+        for &p in &st.pds {
+            if selected.contains(&p) {
+                continue;
+            }
+            let parents: Vec<u64> = st
+                .children
+                .iter()
+                .filter(|(_, kids)| kids.contains(&p))
+                .map(|(par, _)| *par)
+                .collect();
+            if !parents.is_empty() && parents.iter().all(|par| selected.contains(par)) {
+                more.push(p);
+            }
+        }
+        if more.is_empty() {
+            break;
+        }
+        selected.extend(more);
     }
     // assemblies whose children are all removed go too (repeat upwards)
     loop {
@@ -1267,6 +1351,341 @@ fn edit_record(text: &str, r: &Rec, drops: &HashSet<(usize, usize)>) -> String {
         s.replace_range(a..b, &body.join(sep));
     }
     s
+}
+
+/// Replace the solid of a part definition by the solid of a one-solid STEP
+/// text (same length unit). The new records get fresh ids at the end of the
+/// DATA section, every reference to the old solid (shape representation,
+/// colours, layers) points at the new one, and the old geometry is deleted.
+/// Nothing else changes.
+pub fn splice_solid(text: &str, pd: u64, solid_step: &str) -> Result<String, String> {
+    const SOLIDS: &[&str] = &["MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS", "FACETED_BREP"];
+    let is_solid = |e: &HashMap<u64, Entity>, id: u64| SOLIDS.iter().any(|t| has(e, id, t));
+    let e = parse_part21(text)?;
+    let st = structure(&e);
+    let reps = st.reps.get(&pd).ok_or("part has no shape")?;
+    let mut olds = Vec::new();
+    let mut octx = None;
+    for r in reps {
+        if let Some((_, p)) = e.get(r).and_then(|x| x.first()) {
+            for it in p.get(1).map(|x| x.as_list()).unwrap_or(&[]) {
+                if let Some(id) = it.as_ref().filter(|id| is_solid(&e, *id)) {
+                    olds.push(id);
+                    octx = p.get(2).and_then(Param::as_ref);
+                }
+            }
+        }
+    }
+    let [old] = olds[..] else {
+        return Err(format!("the part has {} solids (one expected)", olds.len()));
+    };
+    // the new solid and everything it uses
+    let ne = parse_part21(solid_step)?;
+    let news: Vec<u64> = ne.keys().copied().filter(|id| is_solid(&ne, *id)).collect();
+    let [new] = news[..] else {
+        return Err(format!(
+            "the new shape has {} solids (one expected)",
+            news.len()
+        ));
+    };
+    let nctx = ne.iter().find_map(|(_, ent)| {
+        ent.iter().find_map(|(_, p)| {
+            let items = p.get(1)?.as_list();
+            items
+                .iter()
+                .any(|x| x.as_ref() == Some(new))
+                .then(|| p.get(2).and_then(Param::as_ref))
+                .flatten()
+        })
+    });
+    // units: lengths must agree, angles are converted (Creo writes degrees,
+    // OCCT radians)
+    let (olen, oang) = octx.map(|c| context_units(&e, c)).unwrap_or((None, None));
+    let (nlen, nang) = nctx.map(|c| context_units(&ne, c)).unwrap_or((None, None));
+    if let (Some(a), Some(b)) = (olen, nlen) {
+        if (a - b).abs() > 1e-9 * a.abs().max(1.0) {
+            return Err(format!("length units differ ({a} mm and {b} mm)"));
+        }
+    }
+    let angle = nang.unwrap_or(1.0) / oang.unwrap_or(1.0);
+    let (_, nrecs, _) = scan_records(solid_step)?;
+    let nidx: HashMap<u64, usize> = nrecs.iter().enumerate().map(|(k, r)| (r.id, k)).collect();
+    let mut keep = HashSet::new();
+    let mut stack = vec![new];
+    while let Some(id) = stack.pop() {
+        if !keep.insert(id) {
+            continue;
+        }
+        if let Some(&k) = nidx.get(&id) {
+            stack.extend(nrecs[k].refs.iter().map(|t| t.id));
+        }
+    }
+    // OCCT may write the solid in a shifted frame (a location it kept from
+    // the source file): closing holes leaves the outline unchanged, so the
+    // two boxes give the shift; a rotation is refused
+    let (olo, ohi, _) = geom_box(&e, &[old], false).ok_or("old solid without geometry")?;
+    let (nlo, nhi, _) = geom_box(&ne, &[new], false).ok_or("new solid without geometry")?;
+    let size = (0..3).map(|q| ohi[q] - olo[q]).fold(0.0, f64::max);
+    let tol = 1e-4 * size + 1e-6;
+    let shift = [0, 1, 2].map(|q| olo[q] - nlo[q]);
+    if (0..3).any(|q| (ohi[q] - nhi[q] - shift[q]).abs() > tol) {
+        return Err("the new solid is oriented differently from the old one".into());
+    }
+    let moved = shift.iter().any(|d| d.abs() > tol);
+    let (_, recs, tail) = scan_records(text)?;
+    let offset = recs.iter().map(|r| r.id).max().unwrap_or(0);
+    // the new records, renumbered after the last id of the file
+    let mut added = String::new();
+    for r in nrecs.iter().filter(|r| keep.contains(&r.id)) {
+        let mut s = solid_step[r.start..r.end].to_string();
+        if (angle - 1.0).abs() > 1e-12 {
+            if let Some(p) = rec(&ne, r.id, "CONICAL_SURFACE") {
+                // CONICAL_SURFACE(name, position, radius, semi_angle)
+                let name = p.first().map(|x| x.as_str()).unwrap_or("");
+                let pos = p.get(1).and_then(Param::as_ref).unwrap_or(0) + offset;
+                let rad = p.get(2).and_then(Param::as_num).unwrap_or(0.0);
+                let a = p.get(3).and_then(Param::as_num).unwrap_or(0.0) * angle;
+                s = format!(
+                    "#{}=CONICAL_SURFACE('{}',#{pos},{},{});\n",
+                    r.id + offset,
+                    name.replace('\'', "''"),
+                    real(rad),
+                    real(a)
+                );
+                added.push_str(&s);
+                continue;
+            }
+        }
+        if moved {
+            if let Some(p) = rec(&ne, r.id, "CARTESIAN_POINT") {
+                let c: Vec<f64> = p
+                    .get(1)
+                    .map(|x| x.as_list())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(Param::as_num)
+                    .collect();
+                // 3-D points only (2-D ones are surface parameters)
+                if c.len() == 3 {
+                    let name = p.first().map(|x| x.as_str()).unwrap_or("");
+                    s = format!(
+                        "#{}=CARTESIAN_POINT('{}',({},{},{}));\n",
+                        r.id,
+                        name.replace('\'', "''"),
+                        real(c[0] + shift[0]),
+                        real(c[1] + shift[1]),
+                        real(c[2] + shift[2])
+                    );
+                    // re-scan this record's references: it has none
+                    added.push_str(&renumber_simple(&s, offset));
+                    continue;
+                }
+            }
+        }
+        let mut edits: Vec<(usize, usize, String)> = r
+            .refs
+            .iter()
+            .map(|t| {
+                (
+                    t.start - r.start,
+                    t.end - r.start,
+                    format!("#{}", t.id + offset),
+                )
+            })
+            .collect();
+        let id_end = s.find('=').unwrap_or(0);
+        edits.push((
+            0,
+            s[..id_end].trim_end().len(),
+            format!("#{}", r.id + offset),
+        ));
+        edits.sort_by_key(|x| std::cmp::Reverse(x.0));
+        for (a, b, t) in edits {
+            s.replace_range(a..b, &t);
+        }
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        added.push_str(&s);
+    }
+    // every reference to the old solid now names the new one
+    let new_id = new + offset;
+    let mut out = String::with_capacity(text.len() + added.len());
+    let mut pos = 0;
+    for r in &recs {
+        for t in r.refs.iter().filter(|t| t.id == old) {
+            out.push_str(&text[pos..t.start]);
+            out.push_str(&format!("#{new_id}"));
+            pos = t.end;
+        }
+    }
+    out.push_str(&text[pos..tail]);
+    out.push_str(&added);
+    out.push_str(&text[tail..]);
+    // the old solid is unused now: delete it with the geometry only it used
+    let out = delete_unused(&out, old)?;
+    check_references(&out)?;
+    Ok(out)
+}
+
+/// Length unit (mm) and plane-angle unit (radians) of a representation context.
+fn context_units(e: &HashMap<u64, Entity>, ctx: u64) -> (Option<f64>, Option<f64>) {
+    let len = context_length_unit_mm(e, ctx);
+    let mut ang = None;
+    let units = e
+        .get(&ctx)
+        .and_then(|x| x.iter().find(|(n, _)| n == "GLOBAL_UNIT_ASSIGNED_CONTEXT"))
+        .and_then(|(_, p)| p.first())
+        .map(|p| p.as_list().to_vec())
+        .unwrap_or_default();
+    for u in units.iter().filter_map(Param::as_ref) {
+        let Some(ent) = e.get(&u) else { continue };
+        if !ent.iter().any(|(n, _)| n == "PLANE_ANGLE_UNIT") {
+            continue;
+        }
+        if ent.iter().any(|(n, _)| n == "SI_UNIT") {
+            ang = Some(1.0);
+        } else if let Some((_, p)) = ent.iter().find(|(n, _)| n == "CONVERSION_BASED_UNIT") {
+            let f = p
+                .get(1)
+                .and_then(Param::as_ref)
+                .and_then(|m| rec(e, m, "PLANE_ANGLE_MEASURE_WITH_UNIT"))
+                .and_then(|q| q.first()?.as_num());
+            let name = p
+                .first()
+                .map(|x| x.as_str().to_ascii_uppercase())
+                .unwrap_or_default();
+            ang = Some(match f {
+                Some(v) if v > 0.0 => v,
+                _ if name.contains("DEG") => std::f64::consts::PI / 180.0,
+                _ => 1.0,
+            });
+        }
+    }
+    (len, ang)
+}
+
+/// A number in Part 21 real syntax.
+fn real(v: f64) -> String {
+    if v == 0.0 {
+        "0.".into()
+    } else {
+        format!("{v:.15E}")
+    }
+}
+
+/// Shift the id of a record without references (`#n=...`).
+fn renumber_simple(s: &str, offset: u64) -> String {
+    let eq = s.find('=').unwrap_or(0);
+    let id: u64 = s[1..eq].trim().parse().unwrap_or(0);
+    format!("#{}{}", id + offset, &s[eq..])
+}
+
+/// Delete a record nobody refers to any more, and the records only it used.
+fn delete_unused(text: &str, seed: u64) -> Result<String, String> {
+    let (_, recs, _) = scan_records(text)?;
+    let index: HashMap<u64, usize> = recs.iter().enumerate().map(|(k, r)| (r.id, k)).collect();
+    let mut referrers: HashMap<u64, Vec<u64>> = HashMap::new();
+    for r in &recs {
+        for t in &r.refs {
+            referrers.entry(t.id).or_default().push(r.id);
+        }
+    }
+    if referrers.get(&seed).is_some_and(|v| !v.is_empty()) {
+        return Err(format!("#{seed} is still used"));
+    }
+    let mut deleted: HashSet<u64> = HashSet::from([seed]);
+    let mut queue = vec![seed];
+    while let Some(d) = queue.pop() {
+        let Some(&k) = index.get(&d) else { continue };
+        for t in &recs[k].refs {
+            if deleted.contains(&t.id) {
+                continue;
+            }
+            if referrers
+                .get(&t.id)
+                .is_some_and(|v| v.iter().all(|j| deleted.contains(j)))
+            {
+                deleted.insert(t.id);
+                queue.push(t.id);
+            }
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut prev = 0;
+    for r in recs.iter().filter(|r| deleted.contains(&r.id)) {
+        out.push_str(&text[prev..r.start]);
+        prev = r.end;
+    }
+    out.push_str(&text[prev..]);
+    Ok(out)
+}
+
+/// Holes closed in one part while removing.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Filled {
+    pub part: String,
+    pub holes: usize,
+    pub skipped: usize,
+    pub volume_added_mm3: f64,
+    pub note: String,
+}
+
+/// Remove parts and close, in the parts that stay, the holes that the parts
+/// in `fill_for` went through (screws, washers…), up to `max_hole_mm`.
+#[cfg(feature = "occt")]
+pub fn remove_and_fill(
+    text: &str,
+    part_ids: &[u64],
+    fill_for: &[u64],
+    max_hole_mm: f64,
+) -> Result<(String, Removal, Vec<Filled>), String> {
+    let e = parse_part21(text)?;
+    let st = structure(&e);
+    let unit = length_unit_mm(&e);
+    // XCAF names its prototypes after the product
+    let names: HashSet<String> = fill_for
+        .iter()
+        .filter_map(|id| st.names.get(id).map(|x| x.0.clone()))
+        .collect();
+    let (solids, rep) = if names.is_empty() {
+        (HashMap::new(), Vec::new())
+    } else {
+        crate::holefill::fill_holes(text, &names, unit, max_hole_mm)?
+    };
+    let (mut out, removal) = remove(text, part_ids)?;
+    let mut filled = Vec::new();
+    for h in rep {
+        let mut f = Filled {
+            part: h.part.clone(),
+            holes: h.holes,
+            skipped: h.skipped,
+            volume_added_mm3: h.volume_added_mm3,
+            note: h.note.clone(),
+        };
+        if let Some(step) = solids.get(&h.part) {
+            let pds: Vec<u64> = st
+                .names
+                .iter()
+                .filter(|(id, (disp, _))| disp == &h.part && !part_ids.contains(id))
+                .map(|(id, _)| *id)
+                .collect();
+            let res = match pds[..] {
+                [pd] => splice_solid(&out, pd, step),
+                _ => Err("part not found by name".to_string()),
+            };
+            match res {
+                Ok(t) => out = t,
+                Err(err) => {
+                    f.note = format!("not changed: {err}");
+                    f.holes = 0;
+                    f.volume_added_mm3 = 0.0;
+                }
+            }
+        }
+        filled.push(f);
+    }
+    Ok((out, removal, filled))
 }
 
 /// Every #reference points at an existing record.
@@ -1636,6 +2055,37 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_sub_assembly_removes_its_parts_and_the_list_has_every_part() {
+        let text = sample();
+        let sc = scan(&text).unwrap();
+        // every part and sub-assembly except the top one
+        assert_eq!(
+            sc.all_parts.len(),
+            7,
+            "{:?}",
+            sc.all_parts.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        let kit = sc
+            .all_parts
+            .iter()
+            .find(|p| p.name == "FIXING_KIT")
+            .unwrap();
+        assert!(kit.assembly);
+        let (out, rep) = remove(&text, &[kit.id]).unwrap();
+        assert_eq!(rep.parts.len(), 3, "{:?}", rep.parts);
+        for gone in ["VITE TCEI", "RONDELLA", "FIXING_KIT"] {
+            assert!(!out.contains(gone));
+        }
+        assert!(out.contains("PRODUCT('PCB_MAIN'") && out.contains("PRODUCT('C12'"));
+        check_references(&out).unwrap();
+        // a part by hand (the capacitor) goes alone
+        let c12 = sc.all_parts.iter().find(|p| p.name == "C12").unwrap();
+        let (out, rep) = remove(&text, &[c12.id]).unwrap();
+        assert_eq!(rep.parts, vec!["C12".to_string()]);
+        assert!(out.contains("PRODUCT('PCB_MAIN'") && !out.contains("PRODUCT('C12'"));
+    }
+
+    #[test]
     fn removing_nothing_gives_the_same_file() {
         let text = sample();
         let (out, rep) = remove(&text, &[]).unwrap();
@@ -1650,7 +2100,7 @@ mod tests {
     fn occt_written_file_round_trip() {
         let mut k = crate::occt::kernel().unwrap();
         let doc = k.xcaf_new_document().unwrap();
-        let mut add = |k: &mut occt_wasm::OcctKernel, s, name: &str| {
+        let add = |k: &mut occt_wasm::OcctKernel, s, name: &str| {
             let l = k.xcaf_add_shape(doc, s).unwrap();
             k.xcaf_set_name(doc, l, name).unwrap();
         };
@@ -1678,7 +2128,12 @@ mod tests {
         }
         let text = k.xcaf_export_step(doc).unwrap();
         let sc = scan(&text).unwrap();
-        let ids: Vec<u64> = sc.candidates.iter().filter(|c| c.suggested).map(|c| c.id).collect();
+        let ids: Vec<u64> = sc
+            .candidates
+            .iter()
+            .filter(|c| c.suggested)
+            .map(|c| c.id)
+            .collect();
         assert_eq!(ids.len(), 4, "{:?}", sc.candidates);
         let (out, _) = remove(&text, &ids).unwrap();
         let before = crate::step::read(&text, 0.1).unwrap();
@@ -1698,5 +2153,77 @@ mod tests {
             .collect();
         assert_eq!(names(&after), kept);
         assert_eq!(kept.len(), 3);
+    }
+
+    /// Screws removed, their holes in the plate closed, the vent hole away
+    /// from them left open; the plate keeps its outline and thickness.
+    #[cfg(feature = "occt")]
+    #[test]
+    fn holes_under_removed_screws_are_filled_with_the_plate() {
+        use std::f64::consts::PI;
+        let mut k = crate::occt::kernel().unwrap();
+        let doc = k.xcaf_new_document().unwrap();
+        let mut plate = k.make_box(100.0, 60.0, 3.0).unwrap();
+        for (x, y) in [(10.0, 10.0), (90.0, 10.0), (50.0, 30.0)] {
+            let c = k.make_cylinder(1.7, 10.0).unwrap();
+            let c = k.translate(c, x, y, -2.0).unwrap();
+            plate = k.cut(plate, c).unwrap();
+        }
+        let v_plate = k.get_volume(plate).unwrap();
+        let l = k.xcaf_add_shape(doc, plate).unwrap();
+        k.xcaf_set_name(doc, l, "LAMIERA").unwrap();
+        for (i, x) in [10.0, 90.0].into_iter().enumerate() {
+            let head = k.make_cylinder(2.75, 3.0).unwrap();
+            let head = k.translate(head, 0.0, 0.0, 3.0).unwrap();
+            let shank = k.make_cylinder(1.5, 8.0).unwrap();
+            let shank = k.translate(shank, 0.0, 0.0, -5.0).unwrap();
+            let s = k.fuse(head, shank).unwrap();
+            let s = k.translate(s, x, 10.0, 0.0).unwrap();
+            let l = k.xcaf_add_shape(doc, s).unwrap();
+            k.xcaf_set_name(doc, l, &format!("VITE TCEI M3X8 {i}"))
+                .unwrap();
+        }
+        let text = k.xcaf_export_step(doc).unwrap();
+        let sc = scan(&text).unwrap();
+        let ids: Vec<u64> = sc
+            .candidates
+            .iter()
+            .filter(|c| c.suggested)
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        let (out, rep, filled) = remove_and_fill(&text, &ids, &ids, 12.0).unwrap();
+        assert_eq!(rep.parts.len(), 2);
+        assert_eq!(filled.len(), 1, "{filled:?}");
+        assert_eq!(filled[0].holes, 2, "{filled:?}");
+        let hole = PI * 1.7 * 1.7 * 3.0;
+        assert!(
+            (filled[0].volume_added_mm3 - 2.0 * hole).abs() < 1e-3 * hole,
+            "{filled:?}"
+        );
+        // read back by OCCT: one plate, same box, two holes less, vent open
+        let d2 = k.xcaf_import_step(&out).unwrap();
+        let mut inst = Vec::new();
+        for r in k.xcaf_get_root_labels(d2).unwrap() {
+            crate::defeature::flatten(&mut k, d2, r, crate::defeature::ID, None, &mut inst, 0)
+                .unwrap();
+        }
+        assert_eq!(inst.len(), 1);
+        assert_eq!(inst[0].proto_name, "LAMIERA");
+        let s = crate::defeature::handle(inst[0].proto);
+        let v = k.get_volume(s).unwrap();
+        assert!(
+            (v - (v_plate + 2.0 * hole)).abs() < 1e-3 * hole,
+            "{v} vs {}",
+            v_plate + 2.0 * hole
+        );
+        let bb = k.get_bounding_box(s, false).unwrap();
+        assert!(
+            (bb.max.x - bb.min.x - 100.0).abs() < 1e-6 && (bb.max.z - bb.min.z - 3.0).abs() < 1e-6
+        );
+        check_references(&out).unwrap();
+        // the header and the name of the plate are untouched
+        assert_eq!(text.split("DATA;").next(), out.split("DATA;").next());
+        assert!(out.contains("LAMIERA"));
     }
 }

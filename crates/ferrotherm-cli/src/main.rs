@@ -174,6 +174,16 @@ enum Cmd {
         /// Keep parts whose name contains this text (repeatable)
         #[arg(long)]
         keep: Vec<String>,
+        /// Also remove parts whose name contains this text (repeatable; any part)
+        #[arg(long)]
+        remove: Vec<String>,
+        /// Close the holes the removed fasteners went through, with the
+        /// material of the part they are in (OpenCascade)
+        #[arg(long)]
+        fill_holes: bool,
+        /// Largest hole closed, mm
+        #[arg(long, default_value_t = 12.0)]
+        max_hole: f64,
         /// Write the scan as JSON
         #[arg(long)]
         report: Option<PathBuf>,
@@ -799,6 +809,9 @@ fn main() -> Result<()> {
             possible,
             standoffs,
             keep,
+            remove,
+            fill_holes,
+            max_hole,
             report,
         } => {
             use ferrotherm_io::fasteners;
@@ -847,13 +860,44 @@ fn main() -> Result<()> {
                 std::fs::write(&r, serde_json::to_string_pretty(&sc)?)?;
             }
             if let Some(o) = out {
-                let ids: Vec<u64> = sc
+                let fill_ids: Vec<u64> = sc
                     .candidates
                     .iter()
                     .filter(|c| chosen(c))
                     .map(|c| c.id)
                     .collect();
-                let (clean, rep) = fasteners::remove(&text, &ids).map_err(anyhow::Error::msg)?;
+                let mut ids = fill_ids.clone();
+                for p in &sc.all_parts {
+                    let hit = remove
+                        .iter()
+                        .any(|r| p.name.to_lowercase().contains(&r.to_lowercase()));
+                    if hit && !ids.contains(&p.id) {
+                        println!("  [x] by name: {}", p.name);
+                        ids.push(p.id);
+                    }
+                }
+                let (clean, rep) = if fill_holes {
+                    let (c, r, filled) =
+                        fasteners::remove_and_fill(&text, &ids, &fill_ids, max_hole)
+                            .map_err(anyhow::Error::msg)?;
+                    for f in &filled {
+                        println!(
+                            "  holes closed in {}: {} ({} skipped, +{:.1} mm³){}",
+                            f.part,
+                            f.holes,
+                            f.skipped,
+                            f.volume_added_mm3,
+                            if f.note.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {}", f.note)
+                            }
+                        );
+                    }
+                    (c, r)
+                } else {
+                    fasteners::remove(&text, &ids).map_err(anyhow::Error::msg)?
+                };
                 std::fs::write(&o, clean)?;
                 println!(
                     "wrote {}: removed {} parts ({} occurrences), {} records deleted, {} edited, {} → {} bytes",

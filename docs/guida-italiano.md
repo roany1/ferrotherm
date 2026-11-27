@@ -364,9 +364,9 @@ ferrotherm defeature chassis.step semplice.step --holes 8 --fillets 3 --chamfers
 Vengono riconosciute le facce analitiche (cilindri, coni, tori, piani): un
 foro esportato come superficie B-spline non viene riconosciuto.
 
-### 6.2 Togliere viti, rondelle e dadi (stesso file STEP)
+### 6.2 Togliere viti, rondelle, dadi e pezzi inutili (stesso file STEP)
 
-*File → Remove fasteners from STEP…* apre un file STEP, riconosce le
+*File → Clean STEP (fasteners, parts, holes)…* apre un file STEP, riconosce le
 minuterie (viti, rondelle, dadi, rivetti, spine, inserti, distanziali) e
 mostra l'elenco: tipo, confidenza, numero di istanze, dimensioni, nome e
 motivo. Le voci spuntate vengono tolte; *Save STEP without the selected
@@ -401,16 +401,40 @@ identici byte per byte; un sottoassieme rimasto vuoto viene tolto anche lui.
 Prima di scrivere viene controllato che non resti nessun riferimento
 mancante.
 
+**Altri pezzi inutili.** La scheda *All parts* elenca tutti i pezzi e i
+sottoassiemi (nome, assieme che lo usa, istanze, dimensioni), con il filtro
+per nome e il pulsante *Select parts smaller than … mm*. Si spunta qualsiasi
+pezzo: etichette, cavi, connettori, viti con nomi strani. Togliendo un
+sottoassieme se ne vanno anche i pezzi usati solo lì dentro.
+
+**Chiudere i fori.** Con *Close the holes of the removed fasteners*
+(attivo di default, fino a Ø 12 mm) i fori in cui passavano le viti, le
+rondelle e i dadi tolti vengono chiusi nei pezzi che restano. Sono chiusi
+solo i fori il cui asse passa dentro la vite tolta e il cui diametro ci sta
+(svasature e lamature comprese), non le altre forature della lamiera.
+OpenCascade prolunga le facce attorno al foro: il foro viene riempito con lo
+stesso solido del pezzo, quindi con lo stesso materiale, e la lamiera
+mantiene spessore e contorno. Ogni pezzo chiuso viene controllato: non deve
+diventare più grande di prima e non deve guadagnare più volume di quello dei
+suoi fori; un foro che non passa il controllo resta aperto e viene elencato
+(*Holes closed, per part*). Il nuovo solido sostituisce il vecchio dentro lo
+stesso file: nomi, colori, posizioni e il resto dell'assieme non cambiano.
+Gli angoli vengono convertiti nell'unità del file (Creo scrive in gradi,
+OpenCascade in radianti). Su assiemi grandi servono alcuni minuti.
+
 Da riga di comando:
 
 ```bash
 ferrotherm fasteners assieme.stp                    # solo l'elenco
 ferrotherm fasteners assieme.stp -o pulito.stp      # toglie quelli proposti
 ferrotherm fasteners assieme.stp -o pulito.stp --possible --keep 2146-0601
+ferrotherm fasteners assieme.stp -o pulito.stp --fill-holes --remove ETICHETTA
 ```
 
 `--possible` toglie anche quelli proposti solo dalla forma, `--standoffs`
-anche i distanziali, `--keep` salva i pezzi che contengono quel testo.
+anche i distanziali, `--keep` salva i pezzi che contengono quel testo,
+`--remove` toglie anche i pezzi (qualsiasi) che contengono quel testo,
+`--fill-holes` chiude i fori delle minuterie tolte (`--max-hole`, default 12 mm).
 
 La geometria di FerroTherm è fatta di blocchi allineati agli assi: le
 superfici inclinate o curve diventano a gradini. Per schede e componenti

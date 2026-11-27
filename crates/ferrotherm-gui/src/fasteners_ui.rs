@@ -1,15 +1,19 @@
-//! Window that finds the fasteners of a STEP assembly, lets the user review
-//! the list, and saves the same STEP file without the selected parts.
+//! Window that cleans a STEP assembly: finds the fasteners, lets the user
+//! pick any other part to remove, optionally closes the holes the fasteners
+//! went through, and saves the same STEP file without the removed parts.
 
 use eframe::egui::{self, Color32, RichText};
-use ferrotherm_io::fasteners::{self, Kind, Removal, Scan};
+use ferrotherm_io::fasteners::{self, Filled, Kind, Removal, Scan};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
+type SaveResult = Result<(PathBuf, Removal, Vec<Filled>), String>;
+
 enum Job {
     Scanning(Receiver<Result<(Arc<String>, Scan), String>>),
-    Saving(Receiver<Result<(PathBuf, Removal), String>>),
+    Saving(Receiver<SaveResult>),
 }
 
 /// What the app should do after a frame of the window.
@@ -19,18 +23,35 @@ pub enum Action {
     Import(PathBuf),
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum Tab {
+    Fasteners,
+    AllParts,
+}
+
 pub struct FastenerTool {
     pub path: PathBuf,
     text: Option<Arc<String>>,
     scan: Option<Scan>,
-    selected: Vec<bool>,
+    /// Part definitions to remove.
+    selected: HashSet<u64>,
     job: Option<Job>,
     status: Option<(bool, String)>,
+    filled: Vec<Filled>,
     filter: String,
+    tab: Tab,
+    fill_holes: bool,
+    max_hole_mm: f64,
+    small_mm: f64,
     import_after: bool,
     saved: Option<PathBuf>,
     /// The saved file was already handed over for import.
     handed: bool,
+}
+
+fn size_text(s: Option<[f64; 3]>) -> String {
+    s.map(|s| format!("{:.1} × {:.1} × {:.1}", s[0], s[1], s[2]))
+        .unwrap_or_else(|| "—".into())
 }
 
 impl FastenerTool {
@@ -53,10 +74,15 @@ impl FastenerTool {
             path,
             text: None,
             scan: None,
-            selected: Vec::new(),
+            selected: HashSet::new(),
             job: Some(Job::Scanning(rx)),
             status: None,
+            filled: Vec::new(),
             filter: String::new(),
+            tab: Tab::Fasteners,
+            fill_holes: true,
+            max_hole_mm: 12.0,
+            small_mm: 3.0,
             import_after: true,
             saved: None,
             handed: false,
@@ -70,7 +96,12 @@ impl FastenerTool {
                     self.job = None;
                     match r {
                         Ok((t, s)) => {
-                            self.selected = s.candidates.iter().map(|c| c.suggested).collect();
+                            self.selected = s
+                                .candidates
+                                .iter()
+                                .filter(|c| c.suggested)
+                                .map(|c| c.id)
+                                .collect();
                             self.text = Some(t);
                             self.scan = Some(s);
                         }
@@ -82,19 +113,24 @@ impl FastenerTool {
                 if let Ok(r) = rx.try_recv() {
                     self.job = None;
                     match r {
-                        Ok((p, rep)) => {
+                        Ok((p, rep, filled)) => {
+                            let holes: usize = filled.iter().map(|f| f.holes).sum();
+                            let parts = filled.iter().filter(|f| f.holes > 0).count();
                             self.status = Some((
                                 true,
                                 format!(
-                                    "Saved {}: {} parts removed ({} instances), {} records \
-                                     deleted, {} lists edited; everything else is unchanged.",
+                                    "Saved {}: {} parts removed ({} instances){}; everything else is unchanged.",
                                     p.display(),
                                     rep.parts.len(),
                                     rep.occurrences,
-                                    rep.deleted_records,
-                                    rep.edited_records
+                                    if self.fill_holes {
+                                        format!(", {holes} holes closed in {parts} parts")
+                                    } else {
+                                        String::new()
+                                    }
                                 ),
                             ));
+                            self.filled = filled;
                             self.saved = Some(p);
                             self.handed = false;
                         }
@@ -110,12 +146,13 @@ impl FastenerTool {
         let (Some(text), Some(scan)) = (self.text.clone(), self.scan.as_ref()) else {
             return;
         };
-        let ids: Vec<u64> = scan
+        let ids: Vec<u64> = self.selected.iter().copied().collect();
+        // holes are closed for the removed fasteners, not for other parts
+        let fill: Vec<u64> = scan
             .candidates
             .iter()
-            .zip(&self.selected)
-            .filter(|(_, s)| **s)
-            .map(|(c, _)| c.id)
+            .filter(|c| self.selected.contains(&c.id))
+            .map(|c| c.id)
             .collect();
         let stem = self
             .path
@@ -128,7 +165,7 @@ impl FastenerTool {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "stp".into());
         let mut d = rfd::FileDialog::new()
-            .set_file_name(format!("{stem}_no_fasteners.{ext}"))
+            .set_file_name(format!("{stem}_clean.{ext}"))
             .add_filter("STEP", &["stp", "step"]);
         if let Some(dir) = self.path.parent() {
             d = d.set_directory(dir);
@@ -143,16 +180,181 @@ impl FastenerTool {
         }
         let (tx, rx) = channel();
         let ctx2 = ctx.clone();
+        let (fill_holes, max_hole) = (self.fill_holes, self.max_hole_mm);
         std::thread::spawn(move || {
-            let r = fasteners::remove(&text, &ids).and_then(|(clean, rep)| {
+            let r = if fill_holes && !fill.is_empty() {
+                fasteners::remove_and_fill(&text, &ids, &fill, max_hole)
+            } else {
+                fasteners::remove(&text, &ids).map(|(t, r)| (t, r, Vec::new()))
+            }
+            .and_then(|(clean, rep, filled)| {
                 std::fs::write(&out, clean).map_err(|e| format!("{}: {e}", out.display()))?;
-                Ok((out, rep))
+                Ok((out, rep, filled))
             });
             let _ = tx.send(r);
             ctx2.request_repaint();
         });
         self.job = Some(Job::Saving(rx));
         self.status = None;
+        self.filled.clear();
+    }
+
+    fn fasteners_tab(&mut self, ui: &mut egui::Ui, scan: &Scan) {
+        ui.horizontal(|ui| {
+            if ui.button("Suggested").clicked() {
+                for c in &scan.candidates {
+                    if c.suggested {
+                        self.selected.insert(c.id);
+                    } else {
+                        self.selected.remove(&c.id);
+                    }
+                }
+            }
+            if ui.button("All").clicked() {
+                self.selected.extend(scan.candidates.iter().map(|c| c.id));
+            }
+            if ui.button("None").clicked() {
+                for c in &scan.candidates {
+                    self.selected.remove(&c.id);
+                }
+            }
+        });
+        let f = self.filter.to_lowercase();
+        egui::ScrollArea::vertical()
+            .id_salt("fast-scroll")
+            .max_height(ui.available_height() - 120.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("fast-grid")
+                    .striped(true)
+                    .num_columns(7)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in [
+                            "",
+                            "Kind",
+                            "Confidence",
+                            "Instances",
+                            "Size (mm)",
+                            "Name",
+                            "Why",
+                        ] {
+                            ui.label(RichText::new(h).strong());
+                        }
+                        ui.end_row();
+                        for c in &scan.candidates {
+                            if !f.is_empty() && !c.name.to_lowercase().contains(&f) {
+                                continue;
+                            }
+                            let mut on = self.selected.contains(&c.id);
+                            if ui.checkbox(&mut on, "").changed() {
+                                if on {
+                                    self.selected.insert(c.id);
+                                } else {
+                                    self.selected.remove(&c.id);
+                                }
+                            }
+                            let col = match c.kind {
+                                Kind::Screw => Color32::from_rgb(120, 170, 255),
+                                Kind::Washer => Color32::from_rgb(140, 210, 140),
+                                Kind::Nut => Color32::from_rgb(230, 190, 90),
+                                Kind::Standoff => Color32::from_rgb(200, 140, 220),
+                                _ => Color32::from_rgb(200, 200, 200),
+                            };
+                            ui.colored_label(col, c.kind.label());
+                            let pct = (c.score * 100.0).round();
+                            let src = if c.by_name { "name" } else { "shape" };
+                            ui.add(
+                                egui::ProgressBar::new(c.score as f32)
+                                    .desired_width(110.0)
+                                    .text(format!("{pct:.0}%  {src}")),
+                            );
+                            ui.label(format!("×{}", c.instances));
+                            ui.label(size_text(c.size_mm));
+                            ui.label(&c.name);
+                            let why = c.reasons.join("; ");
+                            ui.add(egui::Label::new(RichText::new(&why).small().weak()).truncate())
+                                .on_hover_text(&why);
+                            ui.end_row();
+                        }
+                    });
+                if scan.candidates.is_empty() {
+                    ui.label("No fasteners found. Use the All parts tab to pick parts by hand.");
+                }
+            });
+    }
+
+    fn all_parts_tab(&mut self, ui: &mut egui::Ui, scan: &Scan) {
+        ui.horizontal(|ui| {
+            ui.label("Select parts smaller than");
+            ui.add(
+                egui::DragValue::new(&mut self.small_mm)
+                    .range(0.1..=500.0)
+                    .speed(0.1)
+                    .suffix(" mm"),
+            );
+            if ui
+                .button("Select")
+                .on_hover_text("Ticks every part whose largest side is below this size")
+                .clicked()
+            {
+                for p in &scan.all_parts {
+                    if p.size_mm.is_some_and(|s| s[2] < self.small_mm) {
+                        self.selected.insert(p.id);
+                    }
+                }
+            }
+            if ui.button("Clear all").clicked() {
+                self.selected.clear();
+            }
+        });
+        let f = self.filter.to_lowercase();
+        egui::ScrollArea::vertical()
+            .id_salt("parts-scroll")
+            .max_height(ui.available_height() - 120.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("parts-grid")
+                    .striped(true)
+                    .num_columns(5)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in ["", "Name", "In", "Instances", "Size (mm)"] {
+                            ui.label(RichText::new(h).strong());
+                        }
+                        ui.end_row();
+                        for p in &scan.all_parts {
+                            if !f.is_empty()
+                                && !p.name.to_lowercase().contains(&f)
+                                && !p.parent.to_lowercase().contains(&f)
+                            {
+                                continue;
+                            }
+                            let mut on = self.selected.contains(&p.id);
+                            if ui.checkbox(&mut on, "").changed() {
+                                if on {
+                                    self.selected.insert(p.id);
+                                } else {
+                                    self.selected.remove(&p.id);
+                                }
+                            }
+                            let name = if p.assembly {
+                                RichText::new(format!("{} (assembly)", p.name)).strong()
+                            } else {
+                                RichText::new(&p.name)
+                            };
+                            ui.label(name).on_hover_text(if p.assembly {
+                                "Sub-assembly: removing it removes the parts used only inside it"
+                            } else {
+                                "Part"
+                            });
+                            ui.label(RichText::new(&p.parent).weak());
+                            ui.label(format!("×{}", p.instances));
+                            ui.label(size_text(p.size_mm));
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Action> {
@@ -160,7 +362,7 @@ impl FastenerTool {
         let mut action = None;
         let mut open = true;
         let title = format!(
-            "Fasteners — {}",
+            "Clean STEP — {}",
             self.path
                 .file_name()
                 .map(|s| s.to_string_lossy())
@@ -169,7 +371,7 @@ impl FastenerTool {
         egui::Window::new(title)
             .id(egui::Id::new("fastener-tool"))
             .open(&mut open)
-            .default_size([880.0, 520.0])
+            .default_size([900.0, 560.0])
             .resizable(true)
             .show(ctx, |ui| {
                 if let Some(Job::Scanning(_)) = &self.job {
@@ -179,135 +381,80 @@ impl FastenerTool {
                     });
                     return;
                 }
-                let Some(scan) = &self.scan else {
+                let Some(scan) = self.scan.take() else {
                     if let Some((_, e)) = &self.status {
                         ui.colored_label(Color32::from_rgb(230, 90, 80), e);
                     }
                     return;
                 };
                 ui.label(format!(
-                    "{} parts, {} assemblies, unit {} mm. {} possible fasteners; the ticked ones \
-                     are removed. Names decide a selection; shape alone only proposes.",
-                    scan.parts,
-                    scan.assemblies,
-                    scan.unit_mm,
-                    scan.candidates.len()
+                    "{} parts, {} assemblies, unit {} mm. Ticked parts are removed; the rest of the file \
+                     is copied unchanged.",
+                    scan.parts, scan.assemblies, scan.unit_mm
                 ));
                 ui.horizontal(|ui| {
-                    if ui.button("Suggested").clicked() {
-                        for (s, c) in self.selected.iter_mut().zip(&scan.candidates) {
-                            *s = c.suggested;
-                        }
-                    }
-                    if ui.button("All").clicked() {
-                        self.selected.iter_mut().for_each(|s| *s = true);
-                    }
-                    if ui.button("None").clicked() {
-                        self.selected.iter_mut().for_each(|s| *s = false);
-                    }
+                    ui.selectable_value(
+                        &mut self.tab,
+                        Tab::Fasteners,
+                        format!("Fasteners ({})", scan.candidates.len()),
+                    );
+                    ui.selectable_value(
+                        &mut self.tab,
+                        Tab::AllParts,
+                        format!("All parts ({})", scan.all_parts.len()),
+                    );
                     ui.separator();
                     ui.add(
                         egui::TextEdit::singleline(&mut self.filter)
                             .hint_text("filter by name")
                             .desired_width(180.0),
                     );
-                    let n = self.selected.iter().filter(|s| **s).count();
                     let inst: usize = scan
-                        .candidates
+                        .all_parts
                         .iter()
-                        .zip(&self.selected)
-                        .filter(|(_, s)| **s)
-                        .map(|(c, _)| c.instances)
+                        .filter(|p| self.selected.contains(&p.id))
+                        .map(|p| p.instances)
                         .sum();
                     ui.label(
-                        RichText::new(format!("{n} parts, {inst} instances selected")).strong(),
+                        RichText::new(format!("{} parts, {inst} instances selected", self.selected.len()))
+                            .strong(),
                     );
                 });
                 ui.separator();
-                let f = self.filter.to_lowercase();
-                egui::ScrollArea::vertical()
-                    .max_height(ui.available_height() - 90.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        egui::Grid::new("fast-grid")
-                            .striped(true)
-                            .num_columns(7)
-                            .spacing([12.0, 4.0])
-                            .show(ui, |ui| {
-                                for h in [
-                                    "",
-                                    "Kind",
-                                    "Confidence",
-                                    "Instances",
-                                    "Size (mm)",
-                                    "Name",
-                                    "Why",
-                                ] {
-                                    ui.label(RichText::new(h).strong());
-                                }
-                                ui.end_row();
-                                for (k, c) in scan.candidates.iter().enumerate() {
-                                    if !f.is_empty() && !c.name.to_lowercase().contains(&f) {
-                                        continue;
-                                    }
-                                    ui.checkbox(&mut self.selected[k], "");
-                                    let col = match c.kind {
-                                        Kind::Screw => Color32::from_rgb(120, 170, 255),
-                                        Kind::Washer => Color32::from_rgb(140, 210, 140),
-                                        Kind::Nut => Color32::from_rgb(230, 190, 90),
-                                        Kind::Standoff => Color32::from_rgb(200, 140, 220),
-                                        _ => Color32::from_rgb(200, 200, 200),
-                                    };
-                                    ui.colored_label(col, c.kind.label());
-                                    let pct = (c.score * 100.0).round();
-                                    let txt = if c.by_name {
-                                        format!("{pct:.0}%  name")
-                                    } else {
-                                        format!("{pct:.0}%  shape")
-                                    };
-                                    ui.add(
-                                        egui::ProgressBar::new(c.score as f32)
-                                            .desired_width(110.0)
-                                            .text(txt),
-                                    );
-                                    ui.label(format!("×{}", c.instances));
-                                    ui.label(
-                                        c.size_mm
-                                            .map(|s| {
-                                                format!("{:.1} × {:.1} × {:.1}", s[0], s[1], s[2])
-                                            })
-                                            .unwrap_or_else(|| "—".into()),
-                                    );
-                                    ui.label(&c.name);
-                                    let why = c.reasons.join("; ");
-                                    ui.add(
-                                        egui::Label::new(RichText::new(&why).small().weak())
-                                            .truncate(),
-                                    )
-                                    .on_hover_text(&why);
-                                    ui.end_row();
-                                }
-                            });
-                        if scan.candidates.is_empty() {
-                            ui.label("No fasteners found.");
-                        }
-                    });
+                match self.tab {
+                    Tab::Fasteners => self.fasteners_tab(ui, &scan),
+                    Tab::AllParts => self.all_parts_tab(ui, &scan),
+                }
                 ui.separator();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.fill_holes, "Close the holes of the removed fasteners")
+                        .on_hover_text(
+                            "The holes the removed screws, washers and nuts went through are filled \
+                             with the solid of the part they are in (same material, same thickness \
+                             and outline). Holes OpenCascade cannot rebuild stay open and are listed. \
+                             Can take a few minutes on large assemblies.",
+                        );
+                    ui.add_enabled(
+                        self.fill_holes,
+                        egui::DragValue::new(&mut self.max_hole_mm)
+                            .range(1.0..=50.0)
+                            .speed(0.1)
+                            .prefix("up to Ø ")
+                            .suffix(" mm"),
+                    );
+                });
                 ui.horizontal(|ui| {
                     let busy = self.job.is_some();
                     if busy {
                         ui.spinner();
+                        ui.label(if self.fill_holes { "Removing and closing holes…" } else { "Removing…" });
                     }
-                    let any = self.selected.iter().any(|s| *s);
+                    let any = !self.selected.is_empty();
                     if ui
-                        .add_enabled(
-                            !busy && any,
-                            egui::Button::new("Save STEP without the selected parts…"),
-                        )
+                        .add_enabled(!busy && any, egui::Button::new("Save STEP without the selected parts…"))
                         .on_hover_text(
-                            "Writes a new STEP file: the same header, units, names, colours, \
-                             PCBs and components, without the ticked parts. The original file \
-                             is not changed.",
+                            "Writes a new STEP file: the same header, units, names, colours, PCBs \
+                             and components, without the ticked parts. The original is not changed.",
                         )
                         .clicked()
                     {
@@ -328,6 +475,26 @@ impl FastenerTool {
                     };
                     ui.colored_label(col, msg);
                 }
+                if !self.filled.is_empty() {
+                    egui::CollapsingHeader::new("Holes closed, per part")
+                        .id_salt("filled-list")
+                        .show(ui, |ui| {
+                            for f in &self.filled {
+                                let mut t = format!(
+                                    "{}: {} closed (+{:.1} mm³)",
+                                    f.part, f.holes, f.volume_added_mm3
+                                );
+                                if f.skipped > 0 {
+                                    t += &format!(", {} left open", f.skipped);
+                                }
+                                if !f.note.is_empty() {
+                                    t += &format!(" — {}", f.note);
+                                }
+                                ui.label(RichText::new(t).small());
+                            }
+                        });
+                }
+                self.scan = Some(scan);
             });
         // import right after a successful save, if asked
         if self.import_after && !self.handed && action.is_none() {

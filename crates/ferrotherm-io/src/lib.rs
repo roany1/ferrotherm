@@ -15,6 +15,8 @@ pub mod export;
 pub mod fasteners;
 pub mod geom;
 pub mod gerber;
+#[cfg(feature = "occt")]
+pub mod holefill;
 pub mod idf;
 pub mod import;
 pub mod ipc2581;

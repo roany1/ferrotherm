@@ -123,7 +123,7 @@ impl DefeatureReport {
 }
 
 /// Handle of a shape known by its arena id (XCAF label shapes).
-fn handle(id: u32) -> ShapeHandle {
+pub(crate) fn handle(id: u32) -> ShapeHandle {
     occt_wasm::EvolutionData {
         result_id: id,
         modified: vec![],
@@ -133,11 +133,11 @@ fn handle(id: u32) -> ShapeHandle {
     .result()
 }
 
-type M34 = [f64; 12];
-const ID: M34 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+pub(crate) type M34 = [f64; 12];
+pub(crate) const ID: M34 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
 
 /// a ∘ b (apply b first), 3×4 row-major.
-fn compose(a: &M34, b: &M34) -> M34 {
+pub(crate) fn compose(a: &M34, b: &M34) -> M34 {
     let mut r = [0.0; 12];
     for i in 0..3 {
         for j in 0..4 {
@@ -154,21 +154,21 @@ fn compose(a: &M34, b: &M34) -> M34 {
     r
 }
 
-fn e<T: std::fmt::Display>(x: T) -> String {
+pub(crate) fn e<T: std::fmt::Display>(x: T) -> String {
     x.to_string()
 }
 
 /// A part instance of the flattened assembly.
-struct Instance {
-    name: String,
-    proto: u32,
+pub(crate) struct Instance {
+    pub(crate) name: String,
+    pub(crate) proto: u32,
     /// Part definition label (instances of one definition share it).
-    proto_label: i32,
-    proto_name: String,
-    xf: M34,
+    pub(crate) proto_label: i32,
+    pub(crate) proto_name: String,
+    pub(crate) xf: M34,
 }
 
-fn flatten(
+pub(crate) fn flatten(
     k: &mut OcctKernel,
     doc: occt_wasm::DocumentHandle,
     label: i32,
@@ -222,7 +222,7 @@ fn flatten(
     Ok(())
 }
 
-type V = [f64; 3];
+pub(crate) type V = [f64; 3];
 fn sub(a: V, b: V) -> V {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -335,20 +335,22 @@ fn cyl_info(k: &mut OcctKernel, f: ShapeHandle) -> Option<Cyl> {
 
 /// A recognised feature: the faces OCCT must remove together.
 #[derive(Clone)]
-struct Feature {
-    kind: Kind,
-    faces: Vec<ShapeHandle>,
+pub(crate) struct Feature {
+    pub(crate) kind: Kind,
+    pub(crate) faces: Vec<ShapeHandle>,
+    /// Holes: a point on the axis, the axis direction and the largest radius.
+    pub(crate) axis: Option<(V, V, f64)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Hole,
     Boss,
     Fillet,
     Chamfer,
 }
 
-fn analyse(k: &mut OcctKernel, s: ShapeHandle, o: &DefeatureOptions) -> Vec<Feature> {
+pub(crate) fn analyse(k: &mut OcctKernel, s: ShapeHandle, o: &DefeatureOptions) -> Vec<Feature> {
     let faces = k.get_sub_shapes(s, "face").unwrap_or_default();
     let mut infos: Vec<Face> = faces.iter().filter_map(|f| face_info(k, *f)).collect();
     infos.dedup_by(|a, b| a.face == b.face);
@@ -436,6 +438,7 @@ fn analyse(k: &mut OcctKernel, s: ShapeHandle, o: &DefeatureOptions) -> Vec<Feat
             out.push(Feature {
                 kind: Kind::Hole,
                 faces: fs,
+                axis: Some((g[0].a, g[0].d, g[0].r)),
             });
         }
     }
@@ -473,6 +476,7 @@ fn analyse(k: &mut OcctKernel, s: ShapeHandle, o: &DefeatureOptions) -> Vec<Feat
             out.push(Feature {
                 kind: Kind::Boss,
                 faces: fs,
+                axis: None,
             });
         }
     }
@@ -486,6 +490,7 @@ fn analyse(k: &mut OcctKernel, s: ShapeHandle, o: &DefeatureOptions) -> Vec<Feat
                     out.push(Feature {
                         kind: Kind::Fillet,
                         faces: vec![c.face],
+                        axis: None,
                     });
                 }
             }
@@ -507,6 +512,7 @@ fn analyse(k: &mut OcctKernel, s: ShapeHandle, o: &DefeatureOptions) -> Vec<Feat
                 out.push(Feature {
                     kind: Kind::Fillet,
                     faces: vec![f.face],
+                    axis: None,
                 });
             }
         }
@@ -526,6 +532,7 @@ fn analyse(k: &mut OcctKernel, s: ShapeHandle, o: &DefeatureOptions) -> Vec<Feat
                 out.push(Feature {
                     kind: Kind::Chamfer,
                     faces: vec![f.face],
+                    axis: None,
                 });
             }
         }
@@ -554,7 +561,7 @@ fn find_face(k: &mut OcctKernel, s: ShapeHandle, sig: &(String, V, f64)) -> Opti
     None
 }
 
-fn healthy(k: &mut OcctKernel, s: ShapeHandle) -> bool {
+pub(crate) fn healthy(k: &mut OcctKernel, s: ShapeHandle) -> bool {
     k.is_valid(s).unwrap_or(false) && k.get_volume(s).map(|v| v > 0.0).unwrap_or(false)
 }
 
